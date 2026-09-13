@@ -22,6 +22,7 @@ rangerep = re.compile(r"(\w+):(-?\d+|x):(-?\d+|x)$")
 verbose = False
 exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
 autoescape = True  # True: HTML-escape substituted values; use {=!name} or a Raw() value to insert markup verbatim.
+strictvars = False  # False: an unknown variable renders as nothing (like Jinja2's Undefined); True: it is reported (like Jinja2's StrictUndefined).
 
 MISSING = object()  # Sentinel: distinguishes "no default given" from a default of None.
 
@@ -49,6 +50,19 @@ def escape(value):
 def errorspan(msg):
     "Render a template error as a conspicuous inline span."
     return '<span class="ovotemplate_error" style="background-color: red; color: white;">%s</span>' % msg
+
+
+def undefined(kind, name):
+    """Decide what an unknown variable renders as.
+    Lenient by default, like Jinja2's Undefined: a missing name simply produces nothing,
+    which keeps optional fields out of the template. Set strictvars=True for Jinja2's
+    StrictUndefined behaviour, where a typo in a variable name surfaces instead of
+    silently blanking part of the page."""
+    if not strictvars:
+        return ""
+    if not exceptionless:
+        raise KeyError(name)
+    return errorspan('Template error in %s: unknown variable "%s"' % (kind, name))
 
 
 def lookup(vars, name, default=MISSING):
@@ -213,7 +227,7 @@ class Sub(Container):
         try:
             value = lookup(vars, self.name)
         except KeyError:
-            return errorspan('Template error in Sub: unknown variable "%s"' % self.name)
+            return undefined("Sub", self.name)
         if isinstance(value, (int, float)):
             value = str(value)
         if autoescape and not self.raw and isinstance(value, str):
@@ -234,7 +248,10 @@ class Cond(Container):
     def render(self, vars, last, level):
         if verbose:
             print("%sCond.render(vars=%s) type(vars)=%s, self.name=%s, self.inverting=%s" % (indent(level), vars, type(vars), self.name, self.inverting))
-        ok = lookup(vars, self.name, None)  # Assume missing template variable is False.
+        # A missing variable counts as False, in both modes: "{!name ...}" is the
+        # established idiom for "if this isn't set", and unlike Jinja2 there is no
+        # separate "is defined" test to fall back on.
+        ok = lookup(vars, self.name, None)
         if self.inverting:
             ok = not ok
         if not ok:
@@ -315,7 +332,7 @@ class Rep(Container):
         try:
             subvars = lookup(vars, self.name)  # A KeyError here means that a required variable wasn't present.
         except KeyError:
-            return errorspan('Template error in Rep: unknown variable "%s"' % self.name)
+            return undefined("Rep", self.name)
 
         # Resolve the range to plain indices, following Python's own slice semantics:
         # a negative bound counts back from the end, and both are clamped to the list.
@@ -825,6 +842,42 @@ class Test(unittest.TestCase):
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
 
+    def test_undefined_lenient(self):
+        """By default an unknown variable renders as nothing, like Jinja2's Undefined."""
+        from bunch import Bunch, DefaultBunch
+
+        self.assertEqual(Ovotemplate("[{=missing}]").render({}), "[]")
+        self.assertEqual(Ovotemplate("[{=missing}]").render({"other": 1}), "[]")
+        # Same for objects, whether or not they invent a value for unknown attributes.
+        self.assertEqual(Ovotemplate("[{=missing}]").render(Bunch(other=1)), "[]")
+        self.assertEqual(Ovotemplate("[{=age}]").render(DefaultBunch(name="Joe")), "[]")
+        # An explicit None renders as nothing too - note that Jinja2 writes "None" here.
+        self.assertEqual(Ovotemplate("[{=v}]").render({"v": None}), "[]")
+        # Conditions treat a missing name as False, so {!name ...} means "if not set".
+        self.assertEqual(Ovotemplate("{?missing J}{!missing N}").render({}), "N")
+        # Repeating over a missing name yields nothing rather than an error.
+        self.assertEqual(Ovotemplate("[{#missing {=v}}]").render({}), "[]")
+        # A missing name does not swallow the rest of the template.
+        self.assertEqual(Ovotemplate("A{=missing}B").render({}), "AB")
+
+    def test_undefined_strict(self):
+        """With strictvars a typo in a variable name surfaces, like Jinja2's StrictUndefined."""
+        global strictvars, exceptionless
+        previousstrict, previousexc = strictvars, exceptionless
+        try:
+            strictvars = True
+            self.assertIn("Template error", Ovotemplate("{=missing}").render({}))
+            self.assertIn("Template error", Ovotemplate("{#missing {=v}}").render({}))
+            # Known variables are of course still rendered normally.
+            self.assertEqual(Ovotemplate("{=v}").render({"v": "x"}), "x")
+            # Conditions stay lenient even here, so {!name ...} keeps working.
+            self.assertEqual(Ovotemplate("{?missing J}{!missing N}").render({}), "N")
+            # With exceptionless off, the same case raises instead.
+            exceptionless = False
+            self.assertRaises(KeyError, Ovotemplate("{=missing}").render, {})
+        finally:
+            strictvars, exceptionless = previousstrict, previousexc
+
     def test_autoescape(self):
         """Substituted values are HTML-escaped, so context data cannot inject markup."""
         evil = '<script>alert("xss")</script>'
@@ -905,9 +958,18 @@ class Test(unittest.TestCase):
             tem.render(dict(cursussen=[cursus(), cursus(aantaldagen=1, lesvorm_naam="scan")])),
             "klassikaal: 3 dagen; scan: 1 dag")
 
-        # Plain methods are NOT exposed, so a typo keeps reporting an error.
-        self.assertIn("Template error", Ovotemplate("{=get}").render(klassikaal))
-        self.assertIn("Template error", Ovotemplate("{=items}").render({"a": 1}))
+        # Plain methods are NOT exposed; they must not leak into the output as a
+        # repr of a bound method, whichever undefined-mode is in force.
+        self.assertEqual(Ovotemplate("{=get}").render(klassikaal), "")
+        self.assertEqual(Ovotemplate("{=items}").render({"a": 1}), "")
+        global strictvars
+        previous = strictvars
+        try:
+            strictvars = True
+            self.assertIn("Template error", Ovotemplate("{=get}").render(klassikaal))
+            self.assertIn("Template error", Ovotemplate("{=items}").render({"a": 1}))
+        finally:
+            strictvars = previous
 
 
 def acquire(context, pathelems, usebraces=True):
