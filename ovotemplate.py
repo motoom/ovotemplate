@@ -2,7 +2,6 @@
 
 # TODO: String-only mode
 # TODO: in template ook members kunnen accessen: {=cursus.lesvorm}, scheelt weer.
-# TODO: bij tokens en Lits en Conds etc, de regel/charpos van de positie in source template onthouden, makkelijker debuggen.
 
 import os
 import pprint
@@ -48,13 +47,81 @@ def indent(level):
     return "| " + "    " * level
 
 
+class Token(str):
+    """A piece of template source that remembers where it started.
+    Subclasses str, so the lexer, parser and compiler can keep treating tokens
+    as plain strings while the position travels along for free."""
+
+    def __new__(cls, text, line=0, column=0):
+        self = super(Token, cls).__new__(cls, text)
+        self.line = line
+        self.column = column
+        return self
+
+
+class Node(list):
+    """A parsed construct, remembering where its opening brace was, so an error
+    in it can point at the right spot in the template."""
+
+    def __init__(self, line=0, column=0):
+        self.line = line
+        self.column = column
+
+
+def advance(line, column, text):
+    "Return the (line, column) reached after reading text, starting from line/column."
+    for c in text:
+        if c == "\n":
+            line += 1
+            column = 1
+        else:
+            column += 1
+    return line, column
+
+
+def sourcelocation(name, line, column):
+    """Describe a spot in a template for an error message, e.g. "offerte.tpl, line 42, column 17".
+    Whatever isn't known (an unnamed template, an unpositioned node) is simply left out."""
+    parts = []
+    if name:
+        parts.append(str(name))
+    if line:
+        parts.append("line %d" % line)
+        parts.append("column %d" % column)
+    return ", ".join(parts)
+
+
+def errormessage(msg, kind=None, where=""):
+    "Assemble a template error, naming the construct and the source position when known."
+    prefix = "Template error"
+    if kind:
+        prefix += " in %s" % kind
+    if where:
+        prefix += " at %s" % where
+    return "%s: %s" % (prefix, msg)
+
+
 class Raw(str):
     """A string that is already markup and must never be escaped again.
     Setters produce these, so that {:x <b>hi</b>}{=x} keeps working under autoescape."""
 
 
 class UnbalancedBrace(Exception):
-    "A template has an opening brace without a matching closing one, or the other way round."
+    """A template has an opening brace without a matching closing one, or the other way round.
+    Carries the position of the offending brace; process() fills in the template name."""
+
+    def __init__(self, brace, line=0, column=0, templatename=None):
+        self.brace = brace
+        self.line = line
+        self.column = column
+        self.templatename = templatename
+        super(UnbalancedBrace, self).__init__(brace)
+
+    def __str__(self):
+        where = sourcelocation(self.templatename, self.line, self.column)
+        if where:
+            return "unbalanced '%s' at %s" % (self.brace, where)
+        return "unbalanced '%s'" % self.brace
 
 
 def escape(value):
@@ -69,17 +136,18 @@ def errorspan(msg):
     return '<span class="ovotemplate_error" style="background-color: red; color: white;">%s</span>' % msg
 
 
-def undefined(kind, name):
+def undefined(kind, name, where=""):
     """Decide what an unknown variable renders as.
     Lenient by default, like Jinja2's Undefined: a missing name simply produces nothing,
     which keeps optional fields out of the template. Set strictvars=True for Jinja2's
-    StrictUndefined behaviour, where a typo in a variable name surfaces instead of
-    silently blanking part of the page."""
+    StrictUndefined behaviour, where a typo in a variable name surfaces - with the spot
+    in the template where it was written - instead of silently blanking part of the page."""
     if not strictvars:
         return ""
+    msg = errormessage('unknown variable "%s"' % name, kind, where)
     if not exceptionless:
-        raise KeyError(name)
-    return errorspan('Template error in %s: unknown variable "%s"' % (kind, name))
+        raise KeyError(msg)
+    return errorspan(msg)
 
 
 def lookup(vars, name, default=MISSING):
@@ -110,12 +178,32 @@ def lookup(vars, name, default=MISSING):
 class Container(list):
     "Generic container."
 
+    # Where in which template this container was written. compile() fills these in;
+    # containers built by hand simply keep the defaults and report no position.
+    templatename = None
+    line = 0
+    column = 0
+
     def __init__(self, name="", usebraces=True):
         self.name = name
         self.usebraces = usebraces
 
+    def where(self):
+        "Where in the template source this container starts, for error messages."
+        return sourcelocation(self.templatename, self.line, self.column)
+
+    def setorigin(self, templatename, line, column):
+        "Record where this container was written; returns self so it can be chained."
+        self.templatename = templatename
+        self.line = line
+        self.column = column
+        return self
+
     def __repr__(self):
         tag = "%s %s" % (self.__class__.__name__, self.name)
+        where = self.where()
+        if where:
+            tag = "%s @ %s" % (tag.strip(), where)
         return "%s: %s" % (tag.strip(), super(Container, self).__repr__())
 
     def renderchildren(self, vars, last, level):
@@ -188,7 +276,7 @@ class External(Container):
         elif "verb" in self.type:
             output = self.renderverb(vars, last, level)
         else:
-            output = errorspan('Template error in External: "%s" is an unknown external source-type' % self.type)
+            output = errorspan(errormessage('"%s" is an unknown external source-type' % self.type, "External", self.where()))
         return output
 
     def renderinner(self, vars, last, level):
@@ -244,7 +332,7 @@ class Sub(Container):
         try:
             value = lookup(vars, self.name)
         except KeyError:
-            return undefined("Sub", self.name)
+            return undefined("Sub", self.name, self.where())
         if isinstance(value, (int, float)):
             value = str(value)
         if autoescape and not self.raw and isinstance(value, str):
@@ -349,7 +437,7 @@ class Rep(Container):
         try:
             subvars = lookup(vars, self.name)  # A KeyError here means that a required variable wasn't present.
         except KeyError:
-            return undefined("Rep", self.name)
+            return undefined("Rep", self.name, self.where())
 
         # Resolve the range to plain indices, following Python's own slice semantics:
         # a negative bound counts back from the end, and both are clamped to the list.
@@ -392,43 +480,50 @@ def feed(seq):
 
 
 def lexer(it, openbrace, closebrace):
-    """Split input into tokens. A token is either an open brace, a closing brace, or a string without braces."""
+    """Split input into tokens. A token is either an open brace, a closing brace, or a
+    string without braces. Each token records the line and column where it started,
+    counting from 1, so errors can point back into the template source."""
     tokens = []
     token = ""
+    line = column = 1
+    startline = startcolumn = 1
     for c in it:
-        if c == openbrace:
+        if c == openbrace or c == closebrace:
             if token:
-                tokens.append(token)
+                tokens.append(Token(token, startline, startcolumn))
                 token = ""
-            tokens.append(c)
-        elif c == closebrace:
-            if token:
-                tokens.append(token)
-                token = ""
-            tokens.append(c)
+            tokens.append(Token(c, line, column))
         else:
+            if not token:
+                startline, startcolumn = line, column
             token += c
+        if c == "\n":
+            line += 1
+            column = 1
+        else:
+            column += 1
     if token:
-        tokens.append(token)
+        tokens.append(Token(token, startline, startcolumn))
     return tokens
 
 
 def parse(it, node, openbrace, closebrace, nesting=0):
-    """Build a (recursive) nested list from the tokens."""
+    """Build a (recursive) nested list from the tokens, carrying each construct's
+    opening-brace position along into the Node that represents it."""
     for token in it:
         if token == openbrace:
-            subnode = []
+            subnode = Node(getattr(token, "line", 0), getattr(token, "column", 0))
             node.append(subnode)
             parse(it, subnode, openbrace, closebrace, nesting + 1)
         elif token == closebrace:
             if nesting == 0:
-                raise UnbalancedBrace("Unbalanced '%s'" % closebrace)
+                raise UnbalancedBrace(closebrace, getattr(token, "line", 0), getattr(token, "column", 0))
             return
         else:
             node.append(token)
     if nesting:
-        # Ran out of tokens while still inside a construct.
-        raise UnbalancedBrace("Unbalanced '%s'" % openbrace)
+        # Ran out of tokens while still inside a construct; point at its opening brace.
+        raise UnbalancedBrace(openbrace, getattr(node, "line", 0), getattr(node, "column", 0))
 
 
 createinfo = {
@@ -444,18 +539,21 @@ createinfo = {
     }
 
 
-def compile(node, into, usebraces, openbrace, closebrace, level=0):
+def compile(node, into, usebraces, openbrace, closebrace, templatename=None, level=0):
     if verbose:
         print("%s compile: " % indent(level), node)
     for pos, item in enumerate(node):
         if isinstance(item, list):
             if verbose:
                 print("%s #%d list: %r" % (indent(level), pos, item))
+            # The construct's opening brace is the spot to blame for anything inside it.
+            line, column = getattr(item, "line", 0), getattr(item, "column", 0)
+            where = sourcelocation(templatename, line, column)
             head = item[0] if item else ""
             if not head or not head[0] in createinfo:
-                msg = "'%s' without a following valid metachar" % openbrace
+                msg = errormessage("'%s' without a following valid metachar" % openbrace, where=where)
                 if exceptionless:
-                    into.append(Lit(errorspan("Template error: " + msg)))
+                    into.append(Lit(errorspan(msg)).setorigin(templatename, line, column))
                     continue  # Report this one construct, but keep compiling the rest of the template.
                 else:
                     raise ValueError(msg)
@@ -465,34 +563,38 @@ def compile(node, into, usebraces, openbrace, closebrace, level=0):
                 print("%s operator %s, name %s, rest %r" % (indent(level), operator, name, rest))
             # Create correct container
             factoryfunc, options = createinfo[operator]
-            ob = factoryfunc(name, usebraces=usebraces)
+            ob = factoryfunc(name, usebraces=usebraces).setorigin(templatename, line, column)
             if options == CHOPNAME:
-                item[0] = rest
+                # What follows the metachar and name is literal text; it starts just past
+                # the name and its separating whitespace, so walk the position along.
+                restline, restcolumn = advance(getattr(head, "line", 0), getattr(head, "column", 0),
+                                               head[:len(head) - len(rest)])
+                item[0] = Token(rest, restline, restcolumn)
             elif options == CHOPITEM:
                 item = item[1:]
-            into.append(compile(item, ob, usebraces, openbrace, closebrace, level + 1))
+            into.append(compile(item, ob, usebraces, openbrace, closebrace, templatename, level + 1))
         else:
             if verbose:
                 print("%s #%d item: %s" % (indent(level), pos, item))
-            into.append(Lit(item))
+            into.append(Lit(item).setorigin(templatename, getattr(item, "line", 0), getattr(item, "column", 0)))
     return into
 
 
-def process(sourcetext, usebraces, openbrace, closebrace):
+def process(sourcetext, usebraces, openbrace, closebrace, name=None):
     if verbose:
         print("\n\n\nCompile phase")
     tokens = lexer(feed(sourcetext), openbrace, closebrace)
-    # root = Container()
-    root = []
+    root = Node()
     try:
         parse(feed(tokens), root, openbrace, closebrace)
     except UnbalancedBrace as e:
+        e.templatename = name  # Only process() knows which template this was.
         if not exceptionless:
             raise
         result = Container(usebraces=usebraces)
-        result.append(Lit(errorspan("Template error: %s" % e)))
+        result.append(Lit(errorspan(errormessage(str(e)))))
         return result
-    result = compile(root, Container(usebraces=usebraces), usebraces, openbrace, closebrace)
+    result = compile(root, Container(usebraces=usebraces), usebraces, openbrace, closebrace, name)
     if verbose:
         print("Compile result:", result)
     return result
@@ -510,14 +612,14 @@ class Ovotemplate(object):
         else:
             self.openbrace = "«"
             self.closebrace = "»"
+        self.name = name  # Known before compiling, so errors can name the template.
         if s:
-            self.root = process(s, self.usebraces, self.openbrace, self.closebrace)
+            self.root = process(s, self.usebraces, self.openbrace, self.closebrace, self.name)
         elif s is not None:
             self.root = Container(usebraces=self.usebraces)
             self.root.append(Lit(""))
         else:
             self.root = None
-        self.name = name
 
     def fromfile(self, fn):
         """Load a template from a file.
@@ -526,8 +628,8 @@ class Ovotemplate(object):
         """
         with open(fn) as f:
             tpl = f.read()
-        self.root = process(tpl, self.usebraces, self.openbrace, self.closebrace)
         self.name = fn.replace(" ", "_")
+        self.root = process(tpl, self.usebraces, self.openbrace, self.closebrace, self.name)
         return self
 
     def pprint(self):
@@ -914,6 +1016,85 @@ class Test(unittest.TestCase):
             # With exceptionless off, the same case raises instead.
             exceptionless = False
             self.assertRaises(KeyError, Ovotemplate("{=missing}").render, {})
+        finally:
+            strictvars, exceptionless = previousstrict, previousexc
+
+    def test_advance(self):
+        """advance() walks a (line, column) position over a piece of text."""
+        self.assertEqual(advance(1, 1, ""), (1, 1))
+        self.assertEqual(advance(1, 1, "abc"), (1, 4))
+        self.assertEqual(advance(1, 1, "ab\n"), (2, 1))
+        self.assertEqual(advance(1, 1, "ab\ncd"), (2, 3))
+        self.assertEqual(advance(4, 7, "\n\n"), (6, 1))
+
+    def test_positions_in_tree(self):
+        """Every compiled node remembers where in the source it was written."""
+        tem = Ovotemplate("Hoi {=naam},\n{?korting {=pct}%}", "offerte.tpl")
+        lit, sub, comma, cond = tem.root
+        self.assertEqual((lit.line, lit.column), (1, 1))  # "Hoi "
+        self.assertEqual((sub.line, sub.column), (1, 5))  # the { of {=naam}
+        self.assertEqual((comma.line, comma.column), (1, 12))  # ",\n"
+        self.assertEqual((cond.line, cond.column), (2, 1))  # the { of {?korting
+        # Text chopped off the head token keeps its own position, past name and space.
+        innersub = cond[1]
+        self.assertEqual((innersub.line, innersub.column), (2, 11))  # the { of {=pct}
+        # The template name travels along, and where() renders the lot.
+        self.assertEqual(sub.templatename, "offerte.tpl")
+        self.assertEqual(sub.where(), "offerte.tpl, line 1, column 5")
+        self.assertIn("@ offerte.tpl, line 1, column 5", repr(sub))
+        # A container built by hand has no position and says nothing about one.
+        self.assertEqual(Container("handmade").where(), "")
+        self.assertNotIn("@", repr(Container("handmade")))
+
+    def test_positions_in_errors(self):
+        """Errors point at the spot in the template where the mistake was made."""
+        global strictvars, exceptionless
+        previousstrict, previousexc = strictvars, exceptionless
+        try:
+            strictvars = True
+
+            def message(tems, vars=None, name="offerte.tpl"):
+                return Ovotemplate(tems, name).render(vars if vars is not None else {})
+
+            # An unknown variable, in a substitution and in a repetition.
+            self.assertIn('in Sub at offerte.tpl, line 2, column 8: unknown variable "typo"',
+                          message("regel1\nregel2 {=typo}"))
+            self.assertIn('in Rep at offerte.tpl, line 3, column 3: unknown variable "lijstt"',
+                          message("a\nb\n  {#lijstt {=v}}"))
+            # Nested constructs report their own position, not their parent's.
+            self.assertIn('in Sub at diep.tpl, line 3, column 6: unknown variable "naaam"',
+                          message("{?ok\n  {#items\n     {=naaam}}}", {"ok": 1, "items": [{}]}, "diep.tpl"))
+            # A bad metachar, and both flavours of unbalanced brace.
+            self.assertIn("at offerte.tpl, line 2, column 3: '{' without a following valid metachar",
+                          message("x\ny {&bad}"))
+            self.assertIn("unbalanced '{' at offerte.tpl, line 2, column 6",
+                          message("een\ntwee {?c drie", {"c": 1}))
+            self.assertIn("unbalanced '}' at offerte.tpl, line 2, column 5",
+                          message("een\ntwee}"))
+            # An unnamed template still reports line and column.
+            self.assertIn("at line 2, column 8: unknown variable", Ovotemplate("regel1\nregel2 {=typo}").render({}))
+
+            # The same positions reach the exceptions when exceptionless is off.
+            exceptionless = False
+            try:
+                Ovotemplate("x\ny {&bad}", "offerte.tpl")
+            except ValueError as e:
+                self.assertIn("line 2, column 3", str(e))
+            else:
+                self.fail("expected a ValueError")
+            try:
+                Ovotemplate("een\ntwee {?c drie", "offerte.tpl")
+            except UnbalancedBrace as e:
+                self.assertEqual((e.line, e.column), (2, 6))
+                self.assertIn("offerte.tpl, line 2, column 6", str(e))
+            else:
+                self.fail("expected an UnbalancedBrace")
+            try:
+                Ovotemplate("{=typo}", "offerte.tpl").render({})
+            except KeyError as e:
+                self.assertIn("line 1, column 1", str(e))
+            else:
+                self.fail("expected a KeyError")
         finally:
             strictvars, exceptionless = previousstrict, previousexc
 
