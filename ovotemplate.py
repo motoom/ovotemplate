@@ -7,6 +7,7 @@
 import os
 import pprint
 import re
+import html
 import unittest
 import functools
 import datetime
@@ -14,17 +15,35 @@ import datetime
 CHOPNAME = 1
 CHOPITEM = 2
 
-whitechars = re.compile("\s")
-rangerep = re.compile("(\w+)\:(-?[0-9|x]+):(-?[0-9|x]+)")
+whitechars = re.compile(r"\s")
+# A ranged repetition looks like "{#lijst:3:7 ...}"; 'x' means "no bound on this side".
+rangerep = re.compile(r"(\w+):(-?\d+|x):(-?\d+|x)$")
 
 verbose = False
 exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
+autoescape = True  # True: HTML-escape substituted values; use {=!name} or a Raw() value to insert markup verbatim.
 
 MISSING = object()  # Sentinel: distinguishes "no default given" from a default of None.
 
 
 def indent(level):
     return "| " + "    " * level
+
+
+class Raw(str):
+    """A string that is already markup and must never be escaped again.
+    Setters produce these, so that {:x <b>hi</b>}{=x} keeps working under autoescape."""
+
+
+class UnbalancedBrace(Exception):
+    "A template has an opening brace without a matching closing one, or the other way round."
+
+
+def escape(value):
+    "HTML-escape a substituted value, unless it is explicitly marked as Raw."
+    if isinstance(value, Raw):
+        return value
+    return html.escape(value, quote=True)
 
 
 def errorspan(msg):
@@ -116,7 +135,9 @@ class Setter(Container):
         return super(Setter, self).__repr__()
 
     def render(self, vars, last, level):
-        vars[self.name] = self.renderchildren(vars, last, level)
+        # Raw(): the captured text is markup the template itself produced, so reading it
+        # back with {=name} must not escape it a second time.
+        vars[self.name] = Raw(self.renderchildren(vars, last, level))
 
 
 class External(Container):
@@ -178,6 +199,9 @@ class Sub(Container):
     "Container for a variable substitution."
 
     def __init__(self, name, usebraces=True):
+        self.raw = name.startswith("!")  # {=!name} inserts the value without HTML-escaping.
+        if self.raw:
+            name = name[1:]
         super(Sub, self).__init__(name, usebraces=usebraces)
 
     def __repr__(self):
@@ -185,13 +209,15 @@ class Sub(Container):
 
     def render(self, vars, last, level):
         if verbose:
-            print("%sSub.render(vars=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, type(vars), self.name))
+            print("%sSub.render(vars=%s) type(vars)=%s, self.name=%s, self.raw=%s" % (indent(level), vars, type(vars), self.name, self.raw))
         try:
             value = lookup(vars, self.name)
         except KeyError:
             return errorspan('Template error in Sub: unknown variable "%s"' % self.name)
         if isinstance(value, (int, float)):
             value = str(value)
+        if autoescape and not self.raw and isinstance(value, str):
+            value = escape(value)
         return value
 
 
@@ -269,7 +295,7 @@ class Rep(Container):
             self.end = None if rangedefinition.group(3) == 'x' else int(rangedefinition.group(3))
 
             if verbose or self.verbose:
-                print("...%s between from item %d up to and not including %d" % (name, self.start, self.end))
+                print("...%s between from item %s up to and not including %s" % (name, self.start, self.end))
         else:
             self.start = self.end = None
 
@@ -291,17 +317,21 @@ class Rep(Container):
         except KeyError:
             return errorspan('Template error in Rep: unknown variable "%s"' % self.name)
 
+        # Resolve the range to plain indices, following Python's own slice semantics:
+        # a negative bound counts back from the end, and both are clamped to the list.
         count = len(subvars)
-        start = self.start
-        end = self.end
-        if start is not None and start < 0:
-            start = count + start + 1
-        if end is not None and end < 0:
-            end = count + end + 1
+        start = 0 if self.start is None else self.start
+        end = count if self.end is None else self.end
+        if start < 0:
+            start = count + start
+        if end < 0:
+            end = count + end
+        start = min(max(start, 0), count)
+        end = min(max(end, start), count)
 
         for nr, subvar in enumerate(subvars):
-            if (start is None or start <= nr) and (end is None or nr < end):
-                islast = nr == count - 1
+            if start <= nr < end:
+                islast = nr == end - 1  # Last of the *rendered* range, so {/sep} stops there.
                 if verbose or self.verbose:
                     print("%sRep.render subvar=%s, type(subvar)=%s, last=%s" % (indent(level), subvar, type(subvar), islast))
                 output += self.renderchildren(subvar, islast, level)
@@ -358,10 +388,13 @@ def parse(it, node, openbrace, closebrace, nesting=0):
             parse(it, subnode, openbrace, closebrace, nesting + 1)
         elif token == closebrace:
             if nesting == 0:
-                raise Exception("Unbalanced " + closebrace)
+                raise UnbalancedBrace("Unbalanced '%s'" % closebrace)
             return
         else:
             node.append(token)
+    if nesting:
+        # Ran out of tokens while still inside a construct.
+        raise UnbalancedBrace("Unbalanced '%s'" % openbrace)
 
 
 createinfo = {
@@ -417,8 +450,15 @@ def process(sourcetext, usebraces, openbrace, closebrace):
     tokens = lexer(feed(sourcetext), openbrace, closebrace)
     # root = Container()
     root = []
-    parse(feed(tokens), root, openbrace, closebrace)
-    result = compile(root, Container(), usebraces, openbrace, closebrace)
+    try:
+        parse(feed(tokens), root, openbrace, closebrace)
+    except UnbalancedBrace as e:
+        if not exceptionless:
+            raise
+        result = Container(usebraces=usebraces)
+        result.append(Lit(errorspan("Template error: %s" % e)))
+        return result
+    result = compile(root, Container(usebraces=usebraces), usebraces, openbrace, closebrace)
     if verbose:
         print("Compile result:", result)
     return result
@@ -645,6 +685,31 @@ class Test(unittest.TestCase):
                         )
                     },
                 "0123"),
+            # Ranged repetitions with negative bounds, following Python slice semantics.
+            ("{#l:-2:x {=v}}",
+                {"l": ({"v": "a"}, {"v": "b"}, {"v": "c"}, {"v": "d"})},
+                "cd"),
+            ("{#l:x:-1 {=v}}",
+                {"l": ({"v": "a"}, {"v": "b"}, {"v": "c"}, {"v": "d"})},
+                "abc"),
+            ("{#l:-3:-1 {=v}}",
+                {"l": ({"v": "a"}, {"v": "b"}, {"v": "c"}, {"v": "d"})},
+                "bc"),
+            # Out-of-range bounds are clamped, not an error.
+            ("{#l:-99:99 {=v}}",
+                {"l": ({"v": "a"}, {"v": "b"})},
+                "ab"),
+            ("{#l:3:1 {=v}}",
+                {"l": ({"v": "a"}, {"v": "b"})},
+                ""),
+            # A separator inside a ranged repetition stops at the end of the range,
+            # not at the end of the underlying list.
+            ("{#l:0:2 {=v}{/sep , }}",
+                {"l": ({"v": "a"}, {"v": "b"}, {"v": "c"})},
+                "a, b"),
+            ("{#l:1:3 {=v}{/sep , }}",
+                {"l": ({"v": "a"}, {"v": "b"}, {"v": "c"})},
+                "b, c"),
             # Repeat with variabele as last on the line.
             ("{#blop\n{=you}}",
                 dict(blop=(dict(you=123), dict(you=456))),
@@ -668,7 +733,7 @@ class Test(unittest.TestCase):
                 {"count": 2, "articles": ({"nam": "APPL", "pri": 320}, {"nam": "GOOG", "pri": 120})},
                 "sell 2 stocks: APPL &euro; 320, GOOG &euro; 120"),
             # Nested repeats.
-            ("Contents: {#chapters Chapter {=name}. {#sections Section {=name}. }",
+            ("Contents: {#chapters Chapter {=name}. {#sections Section {=name}. }}",
                 {
                     "chapters": [
                         dict(name="Intro", sections=[dict(name="Foreword"), dict(name="Methodology")]),
@@ -759,6 +824,54 @@ class Test(unittest.TestCase):
         phonebook = [Bunch({"name": "Mary", "telephone": "0203898"}), Bunch({"name": "Jan", "telephone": "0683928"})]
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
+
+    def test_autoescape(self):
+        """Substituted values are HTML-escaped, so context data cannot inject markup."""
+        evil = '<script>alert("xss")</script>'
+        escaped = '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'
+        self.assertEqual(Ovotemplate("{=v}").render({"v": evil}), escaped)
+        # Ampersands too, and inside repetitions and conditions.
+        self.assertEqual(Ovotemplate("{=v}").render({"v": "Jip & Janneke"}), "Jip &amp; Janneke")
+        self.assertEqual(Ovotemplate("{?c {=v}}").render({"c": True, "v": evil}), escaped)
+        self.assertEqual(Ovotemplate("{#l {=v}}").render({"l": [{"v": evil}]}), escaped)
+        # Literal text in the template is the author's own markup and stays untouched.
+        self.assertEqual(Ovotemplate("<b>&euro; {=v}</b>").render({"v": "5 & 6"}), "<b>&euro; 5 &amp; 6</b>")
+        # Numbers are unaffected.
+        self.assertEqual(Ovotemplate("{=v}").render({"v": 42}), "42")
+
+    def test_autoescape_optout(self):
+        """{=!name} inserts markup verbatim, and so does anything already marked Raw."""
+        markup = "<b>bold</b>"
+        self.assertEqual(Ovotemplate("{=!v}").render({"v": markup}), markup)
+        self.assertEqual(Ovotemplate("{=v}").render({"v": Raw(markup)}), markup)
+        # A setter captures template markup, so reading it back must not double-escape.
+        self.assertEqual(Ovotemplate("{:x <b>{=v}</b>}{=x}").render({"v": "a & b"}), "<b>a &amp; b</b>")
+        # The global switch turns escaping off altogether.
+        global autoescape
+        previous = autoescape
+        try:
+            autoescape = False
+            self.assertEqual(Ovotemplate("{=v}").render({"v": markup}), markup)
+        finally:
+            autoescape = previous
+
+    def test_unbalanced_braces(self):
+        """A missing brace is reported instead of being silently tolerated."""
+        global exceptionless
+        previous = exceptionless
+        try:
+            exceptionless = False
+            self.assertRaises(UnbalancedBrace, Ovotemplate, "start {?c yes")
+            self.assertRaises(UnbalancedBrace, Ovotemplate, "{#a {=b}")
+            self.assertRaises(UnbalancedBrace, Ovotemplate, "no opening brace}")
+
+            exceptionless = True
+            for bad in ("start {?c yes", "{#a {=b}", "no opening brace}"):
+                self.assertIn("Template error", Ovotemplate(bad).render({"c": True}))
+            # Balanced templates are of course unaffected.
+            self.assertEqual(Ovotemplate("{?c {#a {=b}}}").render({"c": True, "a": [{"b": "x"}]}), "x")
+        finally:
+            exceptionless = previous
 
     def test_properties(self):
         """Computed properties on the context object are usable as template variables,
