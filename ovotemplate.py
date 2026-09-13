@@ -19,10 +19,24 @@ whitechars = re.compile(r"\s")
 # A ranged repetition looks like "{#lijst:3:7 ...}"; 'x' means "no bound on this side".
 rangerep = re.compile(r"(\w+):(-?\d+|x):(-?\d+|x)$")
 
+def envflag(name, default=False):
+    """Read a boolean setting from the environment, so a deployment can flip it
+    without touching code. Accepts 1/true/yes/on (case-insensitive) as true."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 verbose = False
 exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
 autoescape = True  # True: HTML-escape substituted values; use {=!name} or a Raw() value to insert markup verbatim.
-strictvars = False  # False: an unknown variable renders as nothing (like Jinja2's Undefined); True: it is reported (like Jinja2's StrictUndefined).
+
+# False: an unknown variable renders as nothing (like Jinja2's Undefined); True: it is
+# reported (like Jinja2's StrictUndefined), which catches typos in variable names.
+# Turn it on per deployment with OVOTEMPLATE_STRICT=1, or from your own settings with
+# "ovotemplate.strictvars = settings.DEBUG" - assigning to it always wins over the environment.
+strictvars = envflag("OVOTEMPLATE_STRICT")
 
 MISSING = object()  # Sentinel: distinguishes "no default given" from a default of None.
 
@@ -859,6 +873,28 @@ class Test(unittest.TestCase):
         self.assertEqual(Ovotemplate("[{#missing {=v}}]").render({}), "[]")
         # A missing name does not swallow the rest of the template.
         self.assertEqual(Ovotemplate("A{=missing}B").render({}), "AB")
+
+    def test_envflag(self):
+        """Boolean settings can be taken from the environment, so a deployment can
+        enable strict variables without a code change."""
+        name = "OVOTEMPLATE_TEST_FLAG"
+        previous = os.environ.get(name)
+        try:
+            os.environ.pop(name, None)
+            self.assertFalse(envflag(name))
+            self.assertTrue(envflag(name, default=True))  # Unset falls back to the default.
+            for true in ("1", "true", "TRUE", "Yes", "on", " on "):
+                os.environ[name] = true
+                self.assertTrue(envflag(name), "%r should read as true" % true)
+            for false in ("0", "false", "no", "off", "", "banana"):
+                os.environ[name] = false
+                self.assertFalse(envflag(name), "%r should read as false" % false)
+                self.assertFalse(envflag(name, default=True), "%r should override the default" % false)
+        finally:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
 
     def test_undefined_strict(self):
         """With strictvars a typo in a variable name surfaces, like Jinja2's StrictUndefined."""
