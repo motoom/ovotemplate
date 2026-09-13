@@ -30,7 +30,10 @@ def envflag(name, default=False):
 
 verbose = False
 exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
-autoescape = True  # True: HTML-escape substituted values; use {=!name} or a Raw() value to insert markup verbatim.
+# True: HTML-escape substituted values; use {=!name} or a Raw() value to insert markup verbatim.
+# OVOTEMPLATE_AUTOESCAPE=0 falls back to the old unescaped behaviour, so a deployment that
+# trips over a template can be rolled back without a code change.
+autoescape = envflag("OVOTEMPLATE_AUTOESCAPE", default=True)
 
 # False: an unknown variable renders as nothing (like Jinja2's Undefined); True: it is
 # reported (like Jinja2's StrictUndefined), which catches typos in variable names.
