@@ -132,8 +132,10 @@ def escape(value):
 
 
 def errorspan(msg):
-    "Render a template error as a conspicuous inline span."
-    return '<span class="ovotemplate_error" style="background-color: red; color: white;">%s</span>' % msg
+    """Render a template error as a conspicuous inline span.
+    The message is plain text being turned into markup, so it is escaped: a template
+    name or variable name that came in from a request must not become markup itself."""
+    return '<span class="ovotemplate_error" style="background-color: red; color: white;">%s</span>' % html.escape(msg, quote=True)
 
 
 def undefined(kind, name, where=""):
@@ -1054,7 +1056,9 @@ class Test(unittest.TestCase):
             strictvars = True
 
             def message(tems, vars=None, name="offerte.tpl"):
-                return Ovotemplate(tems, name).render(vars if vars is not None else {})
+                # Error spans are escaped markup; undo that so the assertions below
+                # can be written as the plain message a developer would read.
+                return html.unescape(Ovotemplate(tems, name).render(vars if vars is not None else {}))
 
             # An unknown variable, in a substitution and in a repetition.
             self.assertIn('in Sub at offerte.tpl, line 2, column 8: unknown variable "typo"',
@@ -1071,8 +1075,17 @@ class Test(unittest.TestCase):
                           message("een\ntwee {?c drie", {"c": 1}))
             self.assertIn("unbalanced '}' at offerte.tpl, line 2, column 5",
                           message("een\ntwee}"))
+            self.assertIn("'{' without a following valid metachar", message("{&bad}"))
             # An unnamed template still reports line and column.
-            self.assertIn("at line 2, column 8: unknown variable", Ovotemplate("regel1\nregel2 {=typo}").render({}))
+            self.assertIn("at line 2, column 8: unknown variable", message("regel1\nregel2 {=typo}", name=None))
+
+            # A template name that arrived from a request cannot smuggle in markup.
+            hostile = Ovotemplate("{=weg}", "<img src=x onerror=alert(1)>").render({})
+            self.assertNotIn("<img", hostile)
+            self.assertIn("&lt;img src=x onerror=alert(1)&gt;", hostile)
+            # The span itself is of course still markup.
+            self.assertTrue(hostile.startswith('<span class="ovotemplate_error"'))
+            self.assertTrue(hostile.endswith("</span>"))
 
             # The same positions reach the exceptions when exceptionless is off.
             exceptionless = False
@@ -1141,6 +1154,8 @@ class Test(unittest.TestCase):
             exceptionless = True
             for bad in ("start {?c yes", "{#a {=b}", "no opening brace}"):
                 self.assertIn("Template error", Ovotemplate(bad).render({"c": True}))
+            self.assertIn("unbalanced '{' at offerte.tpl, line 2, column 6",
+                          html.unescape(Ovotemplate("een\ntwee {?c drie", "offerte.tpl").render({"c": 1})))
             # Balanced templates are of course unaffected.
             self.assertEqual(Ovotemplate("{?c {#a {=b}}}").render({"c": True, "a": [{"b": "x"}]}), "x")
         finally:

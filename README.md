@@ -169,9 +169,10 @@ Twee dingen daarnaast, die los van escaping staan:
 - `{$file}` en `{$verb}` openen elk pad dat uit de template rolt, inclusief een
   pad dat via `{=naam}` uit je context komt. `{$verb {=pad}}` met een
   context-gestuurde `pad` is dus willekeurige bestandstoegang.
-- De templatenaam komt ongeëscaped in foutmeldingen terecht. Alleen van belang
-  als die naam uit een verzoek kan komen, bijvoorbeeld via `acquire()` met
-  padelementen uit een URL.
+
+Foutmeldingen zelf zijn wél dicht: `errorspan()` escapet zijn boodschap, dus een
+templatenaam of variabelenaam die uit een verzoek komt kan er geen markup in
+smokkelen.
 
 Kortom: escaping sluit de meest voorkomende deur — data die als tekst in HTML
 belandt — maar maakt de engine niet vanzelf veilig. Contextbewuste escaping,
