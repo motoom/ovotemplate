@@ -35,11 +35,17 @@ def errorspan(msg):
 def lookup(vars, name, default=MISSING):
     """Fetch 'name' from a render context, which may be a mapping (dict, Bunch)
     or an object with attributes (namedtuple, model instance, ...).
+    Computed properties on the context's class are found too, so that presentation
+    logic can live in a model (Cursus.duration) instead of in the template.
     Returns 'default' if absent; raises KeyError if absent and no default was given."""
     try:
         return vars[name]
     except KeyError:
-        pass  # A mapping, but without this key.
+        # A mapping, but without this key. A property on the class is still worth
+        # trying; plain methods (dict.items, Bunch.get) deliberately are not, so that
+        # a typo in a variable name keeps producing an error instead of a bound method.
+        if isinstance(getattr(type(vars), name, None), property):
+            return getattr(vars, name)
     except TypeError:
         # Not subscriptable by name (namedtuple, plain object, ...), so try attribute access.
         try:
@@ -753,6 +759,42 @@ class Test(unittest.TestCase):
         phonebook = [Bunch({"name": "Mary", "telephone": "0203898"}), Bunch({"name": "Jan", "telephone": "0683928"})]
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
+
+    def test_properties(self):
+        """Computed properties on the context object are usable as template variables,
+        in substitutions as well as in conditions and repetitions."""
+        from bunch import Cursus
+
+        def cursus(**kwargs):
+            defaults = dict(aantaldagen=3, aanschafeenheid="dag", aanschafeenheid_meervoud="dagen", lesvorm_naam="klassikaal")
+            defaults.update(kwargs)
+            return Cursus(**defaults)
+
+        # A property in a substitution.
+        klassikaal = cursus()
+        self.assertEqual(Ovotemplate("{=duration}").render(klassikaal), "3 dagen")
+        self.assertEqual(Ovotemplate("{=duration_long}").render(klassikaal), "3 trainingsdagen")
+
+        # Properties driving the branches of a condition.
+        tem = Ovotemplate("{?toon_trainingsvormen VORMEN}{?custom_cta CTA}")
+        self.assertEqual(tem.render(klassikaal), "VORMEN")
+        self.assertEqual(tem.render(cursus(lesvorm_naam="coaching")), "CTA")
+
+        # A property returning None renders as nothing, like any other empty variable.
+        self.assertEqual(Ovotemplate("[{=custom_taal}]").render(klassikaal), "[]")
+        self.assertEqual(
+            Ovotemplate("[{=custom_taal}]").render(cursus(lesvorm_naam="scan")),
+            "[De scan kan eventueel verzorgd worden in het Engels.]")
+
+        # Properties survive being reached through a repetition.
+        tem = Ovotemplate("{#cursussen {=lesvorm_naam}: {=duration}{/sep ; }}")
+        self.assertEqual(
+            tem.render(dict(cursussen=[cursus(), cursus(aantaldagen=1, lesvorm_naam="scan")])),
+            "klassikaal: 3 dagen; scan: 1 dag")
+
+        # Plain methods are NOT exposed, so a typo keeps reporting an error.
+        self.assertIn("Template error", Ovotemplate("{=get}").render(klassikaal))
+        self.assertIn("Template error", Ovotemplate("{=items}").render({"a": 1}))
 
 
 def acquire(context, pathelems, usebraces=True):
