@@ -20,9 +20,35 @@ rangerep = re.compile("(\w+)\:(-?[0-9|x]+):(-?[0-9|x]+)")
 verbose = False
 exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
 
+MISSING = object()  # Sentinel: distinguishes "no default given" from a default of None.
+
 
 def indent(level):
     return "| " + "    " * level
+
+
+def errorspan(msg):
+    "Render a template error as a conspicuous inline span."
+    return '<span class="ovotemplate_error" style="background-color: red; color: white;">%s</span>' % msg
+
+
+def lookup(vars, name, default=MISSING):
+    """Fetch 'name' from a render context, which may be a mapping (dict, Bunch)
+    or an object with attributes (namedtuple, model instance, ...).
+    Returns 'default' if absent; raises KeyError if absent and no default was given."""
+    try:
+        return vars[name]
+    except KeyError:
+        pass  # A mapping, but without this key.
+    except TypeError:
+        # Not subscriptable by name (namedtuple, plain object, ...), so try attribute access.
+        try:
+            return getattr(vars, name)
+        except AttributeError:
+            pass
+    if default is MISSING:
+        raise KeyError(name)
+    return default
 
 
 class Container(list):
@@ -36,23 +62,25 @@ class Container(list):
         tag = "%s %s" % (self.__class__.__name__, self.name)
         return "%s: %s" % (tag.strip(), super(Container, self).__repr__())
 
-    def render(self, vars, last=False, level=0):
-        if verbose:
-            print("%sContainer.render(vars=%s,last=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, last, type(vars), self.name))
+    def renderchildren(self, vars, last, level):
+        """Render every child in order and concatenate the results.
+        Every container type renders its contents through this method, so that
+        value coercion (dates, numbers) behaves identically at every nesting level."""
         output = ""
         for child in self:
             if verbose:
-                print("%sContainer.render child %s" % (indent(level), child))
+                print("%s%s.render child %s" % (indent(level), self.__class__.__name__, child))
             value = child.render(vars, last, level + 1)
             if isinstance(value, datetime.datetime):
                 value = value.strftime("%Y-%m-%d %H:%M:%S")
             if value:
-                try:
-                    output += value
-                except UnicodeDecodeError as e:
-                    msg = "Container.render() child %s raises %s, value: %s, %r" % (child.__class__.__name__, e, type(value), value)
-                    raise Exception(msg)
+                output += value
         return output
+
+    def render(self, vars, last=False, level=0):
+        if verbose:
+            print("%sContainer.render(vars=%s,last=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, last, type(vars), self.name))
+        return self.renderchildren(vars, last, level)
 
 
 class Lit(Container):
@@ -82,17 +110,7 @@ class Setter(Container):
         return super(Setter, self).__repr__()
 
     def render(self, vars, last, level):
-
-        output = ""
-
-        for child in self:
-            if verbose:
-                print("%s Setter.render child %s" % (indent(level), child))
-            value = child.render(vars, last, level + 1)
-            if value:
-                output += value
-
-        vars[self.name] = output
+        vars[self.name] = self.renderchildren(vars, last, level)
 
 
 class External(Container):
@@ -112,23 +130,11 @@ class External(Container):
         elif "verb" in self.type:
             output = self.renderverb(vars, last, level)
         else:
-            output = """
-                <span
-                    class="ovotemplate_error"
-                    style="background-color: red; color: white;">
-                    Template error in External: "%s" is an unknown external source-type
-                </span>""" % self.type
+            output = errorspan('Template error in External: "%s" is an unknown external source-type' % self.type)
         return output
 
     def renderinner(self, vars, last, level):
-        inner = ""
-        for child in self:
-            if verbose:
-                print("%sExternal.render child for inner section %s" % (indent(level), child))
-            value = child.render(vars, last, level + 1)
-            if value:
-                inner += value
-        return inner
+        return self.renderchildren(vars, last, level)
 
     def renderverb(self, vars, last, level):
         filename = self.renderinner(vars, last, level)
@@ -159,14 +165,7 @@ class Sep(Container):
             if verbose:
                 print("%sSep.render last is True, empty string returned" % indent(level))
             return ""
-        output = ""
-        for child in self:
-            if verbose:
-                print("%sSep.render child %s" % (indent(level), child))
-            value = child.render(vars, last, level + 1)
-            if value:
-                output += value
-        return output
+        return self.renderchildren(vars, last, level)
 
 
 class Sub(Container):
@@ -182,11 +181,9 @@ class Sub(Container):
         if verbose:
             print("%sSub.render(vars=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, type(vars), self.name))
         try:
-            value = vars[self.name]
-        except TypeError:
-            value = getattr(vars, self.name)
+            value = lookup(vars, self.name)
         except KeyError:
-            return '<span class="ovotemplate_error" style="background-color: red; color: white;">Template error in Sub: unknown variable "%s"</span>' % self.name
+            return errorspan('Template error in Sub: unknown variable "%s"' % self.name)
         if isinstance(value, (int, float)):
             value = str(value)
         return value
@@ -205,21 +202,14 @@ class Cond(Container):
     def render(self, vars, last, level):
         if verbose:
             print("%sCond.render(vars=%s) type(vars)=%s, self.name=%s, self.inverting=%s" % (indent(level), vars, type(vars), self.name, self.inverting))
-        ok = vars.get(self.name)  # Assume missing template variable is False.
+        ok = lookup(vars, self.name, None)  # Assume missing template variable is False.
         if self.inverting:
             ok = not ok
         if not ok:
             if verbose:
                 print("%sCond.render cond is False, empty string returned" % indent(level))
             return ""
-        output = ""
-        for child in self:
-            if verbose:
-                print("%sCond.render child %s" % (indent(level), child))
-            value = child.render(vars, last, level + 1)
-            if value:
-                output += value
-        return output
+        return self.renderchildren(vars, last, level)
 
 
 class Counter(Container):
@@ -237,7 +227,7 @@ class Counter(Container):
     def render(self, vars, last, level):
         if verbose:
             print("%sCounter.render(vars=%s) type(vars)=%s, self.name=%s, self.count=%d" % (indent(level), vars, type(vars), self.name, self.count))
-        item = vars.get(self.name)
+        item = lookup(vars, self.name, None)
         output = ""
 
         if item is not None:
@@ -249,12 +239,7 @@ class Counter(Container):
                 ok = len(item) > self.count
 
             if ok:
-                for child in self:
-                    if verbose:
-                        print("%sCount.render child %s" % (indent(level), child))
-                    value = child.render(vars, last, level + 1)
-                    if value:
-                        output += value
+                output = self.renderchildren(vars, last, level)
             elif verbose:
                 print("%sCount.render len(%s) doesn't %d %d, empty string returned" % (indent(level), self.name, self.compare, self.count))
 
@@ -296,11 +281,9 @@ class Rep(Container):
         output = ""
         # TODO: Dit kan nuttige debug info opleveren: if not self.name in vars: raise NameNotFound("A required variable name '%s' was not present in '%r'" % (self.name, vars))
         try:
-            subvars = vars[self.name]  # A KeyError here means that a required variable wasn't present.
-        except TypeError:
-            subvars = getattr(vars, self.name)
+            subvars = lookup(vars, self.name)  # A KeyError here means that a required variable wasn't present.
         except KeyError:
-            return '<span class="ovotemplate_error" style="background-color: red; color: white;">Template error in Rep: unknown variable "%s"</span>' % self.name
+            return errorspan('Template error in Rep: unknown variable "%s"' % self.name)
 
         count = len(subvars)
         start = self.start
@@ -312,15 +295,10 @@ class Rep(Container):
 
         for nr, subvar in enumerate(subvars):
             if (start is None or start <= nr) and (end is None or nr < end):
+                islast = nr == count - 1
                 if verbose or self.verbose:
-                    print("%sRep.render subvar=%s, type(subvar)=%s" % (indent(level), subvar, type(subvar)))
-                for child in self:
-                    last = nr == len(subvars) - 1
-                    if verbose or self.verbose:
-                        print("%sRep.render child %s, last=%s" % (indent(level), child, last))
-                    value = child.render(subvar, last, level + 1)
-                    if value or self.verbose:
-                        output += value
+                    print("%sRep.render subvar=%s, type(subvar)=%s, last=%s" % (indent(level), subvar, type(subvar), islast))
+                output += self.renderchildren(subvar, islast, level)
         return output
 
 
@@ -400,12 +378,14 @@ def compile(node, into, usebraces, openbrace, closebrace, level=0):
         if isinstance(item, list):
             if verbose:
                 print("%s #%d list: %r" % (indent(level), pos, item))
-            head = item[0]
-            if not head[0] in createinfo:
+            head = item[0] if item else ""
+            if not head or not head[0] in createinfo:
+                msg = "'%s' without a following valid metachar" % openbrace
                 if exceptionless:
-                    return Lit("<span style=\"background-color: red; color: white;\">Template error: '%s' without a following valid metachar</span>" % openbrace)
+                    into.append(Lit(errorspan("Template error: " + msg)))
+                    continue  # Report this one construct, but keep compiling the rest of the template.
                 else:
-                    raise ValueError("'%s' without a following valid metachar" % openbrace)
+                    raise ValueError(msg)
             first, rest = splitfirst(head)
             operator, name = first[0], first[1:]
             if verbose:
@@ -441,7 +421,7 @@ def process(sourcetext, usebraces, openbrace, closebrace):
 class Ovotemplate(object):
     """Simple templating class."""
 
-    def __init__(self, s=None, name=None, usebraces=False):
+    def __init__(self, s=None, name=None, usebraces=True):
         """Initialize a template, optionally from a template string."""
         self.usebraces = usebraces
         if self.usebraces:
@@ -511,7 +491,7 @@ class Test(unittest.TestCase):
         self.assertTrue("Template error" in res)
         exceptionless = prevexceptionless
 
-    def DISABLED_test_alternatebraces(self):
+    def test_alternatebraces(self):
         tem = Ovotemplate("Hello, {=name}!", "nametest")
         self.assertEqual(tem.render(dict(name="world")), "Hello, world!")
         tem = Ovotemplate("Hello, «=name»!", "nametest", usebraces=False) # Note that unicode must be used here
