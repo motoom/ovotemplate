@@ -1,0 +1,858 @@
+#!/usr/bin/env python3
+
+# TODO: String-only mode
+# TODO: in template ook members kunnen accessen: {=cursus.lesvorm}, scheelt weer.
+# TODO: bij tokens en Lits en Conds etc, de regel/charpos van de positie in source template onthouden, makkelijker debuggen.
+
+import os
+import pprint
+import re
+import unittest
+import functools
+import datetime
+
+CHOPNAME = 1
+CHOPITEM = 2
+
+whitechars = re.compile("\s")
+rangerep = re.compile("(\w+)\:(-?[0-9|x]+):(-?[0-9|x]+)")
+
+verbose = False
+exceptionless = True  # False: throw exceptions when something is wrong with the template or rendering it; True: insert an error in the output text instead.
+
+
+def indent(level):
+    return "| " + "    " * level
+
+
+class Container(list):
+    "Generic container."
+
+    def __init__(self, name="", usebraces=True):
+        self.name = name
+        self.usebraces = usebraces
+
+    def __repr__(self):
+        tag = "%s %s" % (self.__class__.__name__, self.name)
+        return "%s: %s" % (tag.strip(), super(Container, self).__repr__())
+
+    def render(self, vars, last=False, level=0):
+        if verbose:
+            print("%sContainer.render(vars=%s,last=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, last, type(vars), self.name))
+        output = ""
+        for child in self:
+            if verbose:
+                print("%sContainer.render child %s" % (indent(level), child))
+            value = child.render(vars, last, level + 1)
+            if isinstance(value, datetime.datetime):
+                value = value.strftime("%Y-%m-%d %H:%M:%S")
+            if value:
+                try:
+                    output += value
+                except UnicodeDecodeError as e:
+                    msg = "Container.render() child %s raises %s, value: %s, %r" % (child.__class__.__name__, e, type(value), value)
+                    raise Exception(msg)
+        return output
+
+
+class Lit(Container):
+    "Container for literal content."
+
+    def __init__(self, contents="", usebraces=True):
+        super(Lit, self).__init__(usebraces=usebraces)
+        self.append(contents)
+
+    def __repr__(self):
+        return super(Lit, self).__repr__()
+
+    def render(self, vars, last=None, level=0):
+        if verbose:
+            print("%sLit.render(vars=%s,last=%s) type(vars)=%s, self=%s" % (indent(level), vars, last, type(vars), self))
+        return self[0]
+
+
+class Setter(Container):
+    "Assigns the enclosed text to a var"
+
+    def __init__(self, name, usebraces=True):
+        super(Setter, self).__init__(name, usebraces=usebraces)
+        self.name = name
+
+    def __repr__(self):
+        return super(Setter, self).__repr__()
+
+    def render(self, vars, last, level):
+
+        output = ""
+
+        for child in self:
+            if verbose:
+                print("%s Setter.render child %s" % (indent(level), child))
+            value = child.render(vars, last, level + 1)
+            if value:
+                output += value
+
+        vars[self.name] = output
+
+
+class External(Container):
+    "External Content (file or verb)"
+
+    def __init__(self, type, usebraces=True):
+        super(External, self).__init__(type, usebraces=usebraces)
+        self.type = type
+        self.usebraces = usebraces
+
+    def __repr__(self):
+        return super(External, self).__repr__()
+
+    def render(self, vars, last, level):
+        if "file" in self.type:
+            output = self.renderfile(vars, last, level, self.usebraces)
+        elif "verb" in self.type:
+            output = self.renderverb(vars, last, level)
+        else:
+            output = """
+                <span
+                    class="ovotemplate_error"
+                    style="background-color: red; color: white;">
+                    Template error in External: "%s" is an unknown external source-type
+                </span>""" % self.type
+        return output
+
+    def renderinner(self, vars, last, level):
+        inner = ""
+        for child in self:
+            if verbose:
+                print("%sExternal.render child for inner section %s" % (indent(level), child))
+            value = child.render(vars, last, level + 1)
+            if value:
+                inner += value
+        return inner
+
+    def renderverb(self, vars, last, level):
+        filename = self.renderinner(vars, last, level)
+        with open(filename, "r") as f:
+            s = f.read()
+        return s
+
+    def renderfile(self, vars, last, level, usebraces):
+        filename = self.renderinner(vars, last, level)
+        tpl = Ovotemplate(usebraces=usebraces).fromfile(filename)
+        output = tpl.render(vars)
+        return output
+
+
+class Sep(Container):
+    "Container for separator. Same as Lit, but doesn't result in output in the last iteration of a Rep."
+
+    def __init__(self, name, usebraces=True):
+        super(Sep, self).__init__(name, usebraces=usebraces)
+
+    def __repr__(self):
+        return super(Sep, self).__repr__()
+
+    def render(self, vars, last, level):
+        if verbose:
+            print("%sSep.render(vars=%s) type(vars)=%s, self=%s" % (indent(level), vars, type(vars), self))
+        if last:
+            if verbose:
+                print("%sSep.render last is True, empty string returned" % indent(level))
+            return ""
+        output = ""
+        for child in self:
+            if verbose:
+                print("%sSep.render child %s" % (indent(level), child))
+            value = child.render(vars, last, level + 1)
+            if value:
+                output += value
+        return output
+
+
+class Sub(Container):
+    "Container for a variable substitution."
+
+    def __init__(self, name, usebraces=True):
+        super(Sub, self).__init__(name, usebraces=usebraces)
+
+    def __repr__(self):
+        return super(Sub, self).__repr__()
+
+    def render(self, vars, last, level):
+        if verbose:
+            print("%sSub.render(vars=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, type(vars), self.name))
+        try:
+            value = vars[self.name]
+        except TypeError:
+            value = getattr(vars, self.name)
+        except KeyError:
+            return '<span class="ovotemplate_error" style="background-color: red; color: white;">Template error in Sub: unknown variable "%s"</span>' % self.name
+        if isinstance(value, (int, float)):
+            value = str(value)
+        return value
+
+
+class Cond(Container):
+    "Container for conditional content."
+
+    def __init__(self, name, inverting=False, usebraces=True):
+        super(Cond, self).__init__(name, usebraces=usebraces)
+        self.inverting = inverting
+
+    def __repr__(self):
+        return super(Cond, self).__repr__()
+
+    def render(self, vars, last, level):
+        if verbose:
+            print("%sCond.render(vars=%s) type(vars)=%s, self.name=%s, self.inverting=%s" % (indent(level), vars, type(vars), self.name, self.inverting))
+        ok = vars.get(self.name)  # Assume missing template variable is False.
+        if self.inverting:
+            ok = not ok
+        if not ok:
+            if verbose:
+                print("%sCond.render cond is False, empty string returned" % indent(level))
+            return ""
+        output = ""
+        for child in self:
+            if verbose:
+                print("%sCond.render child %s" % (indent(level), child))
+            value = child.render(vars, last, level + 1)
+            if value:
+                output += value
+        return output
+
+
+class Counter(Container):
+    "Container for counted content."
+
+    def __init__(self, name, count=0, compare=0, usebraces=True):
+        super(Counter, self).__init__(name, usebraces=usebraces)
+        self.name = name
+        self.count = count
+        self.compare = compare
+
+    def __repr__(self):
+        return super(Counter, self).__repr__()
+
+    def render(self, vars, last, level):
+        if verbose:
+            print("%sCounter.render(vars=%s) type(vars)=%s, self.name=%s, self.count=%d" % (indent(level), vars, type(vars), self.name, self.count))
+        item = vars.get(self.name)
+        output = ""
+
+        if item is not None:
+            if self.compare == 0:
+                ok = len(item) == self.count
+            elif self.compare < 0:
+                ok = len(item) < self.count
+            elif self.compare > 0:
+                ok = len(item) > self.count
+
+            if ok:
+                for child in self:
+                    if verbose:
+                        print("%sCount.render child %s" % (indent(level), child))
+                    value = child.render(vars, last, level + 1)
+                    if value:
+                        output += value
+            elif verbose:
+                print("%sCount.render len(%s) doesn't %d %d, empty string returned" % (indent(level), self.name, self.compare, self.count))
+
+        return output
+
+
+class Rep(Container):
+    "Container for repeating content."
+
+    def __init__(self, name, usebraces=True):
+        self.verbose = False
+
+        rangedefinition = rangerep.match(name)
+
+        if rangedefinition:
+            if verbose or self.verbose:
+                print("Ranged repetition for...")
+
+            name = rangedefinition.group(1)
+            self.start = None if rangedefinition.group(2) == 'x' else int(rangedefinition.group(2))
+            self.end = None if rangedefinition.group(3) == 'x' else int(rangedefinition.group(3))
+
+            if verbose or self.verbose:
+                print("...%s between from item %d up to and not including %d" % (name, self.start, self.end))
+        else:
+            self.start = self.end = None
+
+            if verbose or self.verbose:
+                print("Reptition %s isn't ranged" % name)
+
+        super(Rep, self).__init__(name, usebraces=usebraces)
+
+    def __repr__(self):
+        return super(Rep, self).__repr__()
+
+    def render(self, vars, last, level):
+        if verbose or self.verbose:
+            print("%sRep.render(vars=%s) type(vars)=%s, self.name=%s" % (indent(level), vars, type(vars), self.name))
+        output = ""
+        # TODO: Dit kan nuttige debug info opleveren: if not self.name in vars: raise NameNotFound("A required variable name '%s' was not present in '%r'" % (self.name, vars))
+        try:
+            subvars = vars[self.name]  # A KeyError here means that a required variable wasn't present.
+        except TypeError:
+            subvars = getattr(vars, self.name)
+        except KeyError:
+            return '<span class="ovotemplate_error" style="background-color: red; color: white;">Template error in Rep: unknown variable "%s"</span>' % self.name
+
+        count = len(subvars)
+        start = self.start
+        end = self.end
+        if start is not None and start < 0:
+            start = count + start + 1
+        if end is not None and end < 0:
+            end = count + end + 1
+
+        for nr, subvar in enumerate(subvars):
+            if (start is None or start <= nr) and (end is None or nr < end):
+                if verbose or self.verbose:
+                    print("%sRep.render subvar=%s, type(subvar)=%s" % (indent(level), subvar, type(subvar)))
+                for child in self:
+                    last = nr == len(subvars) - 1
+                    if verbose or self.verbose:
+                        print("%sRep.render child %s, last=%s" % (indent(level), child, last))
+                    value = child.render(subvar, last, level + 1)
+                    if value or self.verbose:
+                        output += value
+        return output
+
+
+def splitfirst(s):
+    "Split a string into a first special word, and the rest."
+    if not s:
+        return "", ""
+    if s[0] in createinfo:
+        parts = whitechars.split(s, 1)
+        if len(parts) < 2:
+            return s, ""
+        else:
+            return tuple(parts)
+    else:
+        return "", s
+
+
+def feed(seq):
+    for item in seq:
+        yield item
+
+
+def lexer(it, openbrace, closebrace):
+    """Split input into tokens. A token is either an open brace, a closing brace, or a string without braces."""
+    tokens = []
+    token = ""
+    for c in it:
+        if c == openbrace:
+            if token:
+                tokens.append(token)
+                token = ""
+            tokens.append(c)
+        elif c == closebrace:
+            if token:
+                tokens.append(token)
+                token = ""
+            tokens.append(c)
+        else:
+            token += c
+    if token:
+        tokens.append(token)
+    return tokens
+
+
+def parse(it, node, openbrace, closebrace, nesting=0):
+    """Build a (recursive) nested list from the tokens."""
+    for token in it:
+        if token == openbrace:
+            subnode = []
+            node.append(subnode)
+            parse(it, subnode, openbrace, closebrace, nesting + 1)
+        elif token == closebrace:
+            if nesting == 0:
+                raise Exception("Unbalanced " + closebrace)
+            return
+        else:
+            node.append(token)
+
+
+createinfo = {
+    "?": (Cond, CHOPNAME),
+    "!": (functools.partial(Cond, inverting=True), CHOPNAME),
+    "#": (Rep, CHOPNAME),
+    "=": (Sub, CHOPITEM),
+    "/": (Sep, CHOPNAME),
+    "$": (External, CHOPNAME),
+    ":": (Setter, CHOPNAME),
+    "|": (functools.partial(Counter, count=1, compare=0), CHOPNAME),
+    "+": (functools.partial(Counter, count=1, compare=1), CHOPNAME),
+    }
+
+
+def compile(node, into, usebraces, openbrace, closebrace, level=0):
+    if verbose:
+        print("%s compile: " % indent(level), node)
+    for pos, item in enumerate(node):
+        if isinstance(item, list):
+            if verbose:
+                print("%s #%d list: %r" % (indent(level), pos, item))
+            head = item[0]
+            if not head[0] in createinfo:
+                if exceptionless:
+                    return Lit("<span style=\"background-color: red; color: white;\">Template error: '%s' without a following valid metachar</span>" % openbrace)
+                else:
+                    raise ValueError("'%s' without a following valid metachar" % openbrace)
+            first, rest = splitfirst(head)
+            operator, name = first[0], first[1:]
+            if verbose:
+                print("%s operator %s, name %s, rest %r" % (indent(level), operator, name, rest))
+            # Create correct container
+            factoryfunc, options = createinfo[operator]
+            ob = factoryfunc(name, usebraces=usebraces)
+            if options == CHOPNAME:
+                item[0] = rest
+            elif options == CHOPITEM:
+                item = item[1:]
+            into.append(compile(item, ob, usebraces, openbrace, closebrace, level + 1))
+        else:
+            if verbose:
+                print("%s #%d item: %s" % (indent(level), pos, item))
+            into.append(Lit(item))
+    return into
+
+
+def process(sourcetext, usebraces, openbrace, closebrace):
+    if verbose:
+        print("\n\n\nCompile phase")
+    tokens = lexer(feed(sourcetext), openbrace, closebrace)
+    # root = Container()
+    root = []
+    parse(feed(tokens), root, openbrace, closebrace)
+    result = compile(root, Container(), usebraces, openbrace, closebrace)
+    if verbose:
+        print("Compile result:", result)
+    return result
+
+
+class Ovotemplate(object):
+    """Simple templating class."""
+
+    def __init__(self, s=None, name=None, usebraces=False):
+        """Initialize a template, optionally from a template string."""
+        self.usebraces = usebraces
+        if self.usebraces:
+            self.openbrace = "{"
+            self.closebrace = "}"
+        else:
+            self.openbrace = "«"
+            self.closebrace = "»"
+        if s:
+            self.root = process(s, self.usebraces, self.openbrace, self.closebrace)
+        elif s is not None:
+            self.root = Container(usebraces=self.usebraces)
+            self.root.append(Lit(""))
+        else:
+            self.root = None
+        self.name = name
+
+    def fromfile(self, fn):
+        """Load a template from a file.
+        Allows: tem = Ovotemplate().fromfile("hello.tpl")
+        The template file should contain UTF-8 encoded unicode text
+        """
+        with open(fn) as f:
+            tpl = f.read()
+        self.root = process(tpl, self.usebraces, self.openbrace, self.closebrace)
+        self.name = fn.replace(" ", "_")
+        return self
+
+    def pprint(self):
+        """Pretty-print the template structure."""
+        pprint.pprint(self.root)
+
+    def render(self, vars):
+        """Renders the template to a string, using the supplied variables."""
+        if verbose:
+            print("\nRender phase")
+        if not self.root:
+            raise Exception("You should either pass a template as a string in the constructor, or use 'fromfile' to read the template from file")
+        result = self.root.render(vars)
+        if verbose:
+            print("Render result:", result)
+        return result
+
+
+class Test(unittest.TestCase):
+    """Unittest for Ovotemplate."""
+
+    def test_naming(self):
+        """Test the naming; every template instance can have a name (usually the filename where it was loaded from).
+        This name is used in error reporting."""
+        tems = "{=name}"
+        tem = Ovotemplate(tems, "nametest")
+        self.assertEqual(tem.name, "nametest")
+
+    def test_badmetachar(self):
+        tems = "{&name}"  # Note that '&' is illegal after a '{'.
+        #
+        global exceptionless
+        prevexceptionless = exceptionless
+        #
+        exceptionless = False
+        self.assertRaises(ValueError, Ovotemplate, tems)
+        #
+        exceptionless = True
+        tem = Ovotemplate(tems)
+        res = tem.render({})
+        self.assertTrue("Template error" in res)
+        exceptionless = prevexceptionless
+
+    def DISABLED_test_alternatebraces(self):
+        tem = Ovotemplate("Hello, {=name}!", "nametest")
+        self.assertEqual(tem.render(dict(name="world")), "Hello, world!")
+        tem = Ovotemplate("Hello, «=name»!", "nametest", usebraces=False) # Note that unicode must be used here
+        self.assertEqual(tem.render(dict(name="world")), "Hello, world!")
+
+    def DISABLED_test_alternatebraces_extern(self):
+        tem = Ovotemplate("«$verb templates/nl/unittest-helper-guillemets.tpl»", {}, usebraces=False)
+        res = tem.render({"age": 42})
+        self.assertEqual(res, "Voor gebruik in unittests van ovotemplate. Het Universum is «=age» jaar oud.\n")
+        tem = Ovotemplate("«$file templates/nl/unittest-helper-guillemets.tpl»", {}, usebraces=False)
+        res = tem.render({"age": 42})
+        self.assertEqual(res, "Voor gebruik in unittests van ovotemplate. Het Universum is 42 jaar oud.\n")
+
+    def test_splitting(self):
+        self.assertEqual(splitfirst(""), ("", ""))
+        self.assertEqual(splitfirst("?hi"), ("?hi", ""))
+        self.assertEqual(splitfirst("?hi there"), ("?hi", "there"))
+        self.assertEqual(splitfirst("hi"), ("", "hi"))
+        self.assertEqual(splitfirst("hi there"), ("", "hi there"))
+
+    def test_render(self):
+        """Test a number of progressively complex render cases. (template source code, context variables, expected result text)."""
+        goodcases = (
+            # Empty template.
+            ("", {}, ""),
+            # Just a letter.
+            ("a", {}, "a"),
+            # Longer string.
+            ("hi there", {}, "hi there"),
+            # Simple substitution.
+            ("{=status}", {"status": "STATUS"}, "STATUS"),
+            ("{=status}", {"status": 67.2334}, "67.2334"),
+            ("{=status}", {"status": None}, ""),
+            ("{=status}", {"status": False}, "False"),
+            ("BEFORE{=status}", {"status": "STATUS"}, "BEFORESTATUS"),
+            ("{=status}AFTER", {"status": "STATUS"}, "STATUSAFTER"),
+            # Two substitutions in different flavors.
+            ("{=one}{=two}", {"one": "ONE", "two": "TWO"}, "ONETWO"),
+            ("{=one}AND{=two}", {"one": "ONE", "two": "TWO"}, "ONEANDTWO"),
+            ("{=one} {=two}", {"one": "ONE", "two": "TWO"}, "ONE TWO"),
+            ("{=one}   {=two}", {"one": "ONE", "two": "TWO"}, "ONE   TWO"),
+            ("{=one}, {=two}", {"one": "ONE", "two": "TWO"}, "ONE, TWO"),
+            ("{=one} ({=two})", {"one": "ONE", "two": "TWO"}, "ONE (TWO)"),
+            # Substitution with text in between.
+            ("well{=here}it{=goes}with{=some}test",
+                {"here": "HERE", "goes": "GOES", "some": "SOME"},
+                "wellHEREitGOESwithSOMEtest"),
+
+            ('{?useimg hallo <img src="path/names/{=component}/with/{=component}.jpg">}',
+                {"useimg": True, "component": "filesystem"},
+                'hallo <img src="path/names/filesystem/with/filesystem.jpg">'),
+
+            # Simple repetitions.
+            ("{#cls{=co}}",
+                {"cls": ({"co": "red"}, {"co": "gr"}, {"co": "bl"})},
+                "redgrbl"),
+            ("{#cls <{=co}>}",
+                {"cls": ({"co": "red"}, {"co": "gr"}, {"co": "bl"})},
+                "<red><gr><bl>"),
+            ("{#cls {=co}, }",
+                {"cls": ({"co": "red"}, {"co": "gr"}, {"co": "bl"})},
+                "red, gr, bl, "),
+            ("{#cls {=co} x }",
+                {"cls": ({"co": "red"}, {"co": "gr"}, {"co": "bl"})},
+                "red x gr x bl x "),
+            ("{#cls {=co} _}",
+                {"cls": ({"co": "red"}, {"co": "gr"}, {"co": "bl"})},
+                "red _gr _bl _"),
+            # Simple conditions.
+            ("throw a {?condition big }party",
+                {"condition": True},
+                "throw a big party"),
+            ("throw a {?condition big }tantrum",
+                {"condition": 42},
+                "throw a big tantrum"),
+            ("throw a {?condition big }party",
+                {"condition": False},
+                "throw a party"),
+            ("throw a {?condition big }tantrum",
+                {"condition": None},
+                "throw a tantrum"),
+            ("A!{?condition B}!C!{!condition D}!E",
+                {"condition": True},
+                "A!B!C!!E"),
+            ("A!{?condition B}!C!{!condition D}!E",
+                {"condition": False},
+                "A!!C!D!E"),
+            # Repeats.
+            ("{#a{=b}{=c}}",
+                {"a": ({"b": 11, "c": 22},)},
+                "1122"),
+            ("{#a {=b} {=c}}",
+                {"a": [{"b": 33, "c": 44}]},
+                "33 44"),
+            ("{#a STA{=b}STO  BEG{=c}END }",
+                {"a": ({"b": 55, "c": 66},)},
+                "STA55STO  BEG66END "),
+            ("{#a {=b} {=c}}",
+                {"a": ({"b": 7.70, "c": 88}, {"b": 99, "c": 1.234567})},
+                "7.7 8899 1.234567"),
+            ("{#a {=b} {=c}}", {"a": ()}, ""),
+            # Ranged repetitions.
+            ("{#lijst:3:7 {=waarde}}",
+                {
+                    "lijst": (
+                        {"waarde": "0"},
+                        {"waarde": "1"},
+                        {"waarde": "2"},
+                        {"waarde": "3"},
+                        {"waarde": "4"},
+                        {"waarde": "5"},
+                        {"waarde": "6"},
+                        {"waarde": "7"},
+                        {"waarde": "8"}
+                        )
+                    },
+                "3456"),
+            ("{#lijst:3:100 {=waarde}}",
+                {
+                    "lijst": (
+                        {"waarde": "0"},
+                        {"waarde": "1"},
+                        {"waarde": "2"},
+                        {"waarde": "3"},
+                        {"waarde": "4"},
+                        {"waarde": "5"},
+                        {"waarde": "6"},
+                        {"waarde": "7"},
+                        {"waarde": "8"}
+                        )
+                    },
+                "345678"),
+            ("{#lijst:0:4 {=waarde}}",
+                {
+                    "lijst": (
+                        {"waarde": "0"},
+                        {"waarde": "1"},
+                        {"waarde": "2"},
+                        {"waarde": "3"},
+                        {"waarde": "4"},
+                        {"waarde": "5"},
+                        {"waarde": "6"},
+                        {"waarde": "7"},
+                        {"waarde": "8"}
+                        )
+                    },
+                "0123"),
+            # Repeat with variabele as last on the line.
+            ("{#blop\n{=you}}",
+                dict(blop=(dict(you=123), dict(you=456))),
+                "123456"),
+            ("{#blop\n{=you}\n}",
+                dict(blop=(dict(you=123), dict(you=456))),
+                "123\n456\n"),
+            # A join()-like separator.
+            ("{#colors {=color}{/comma , }}",
+                dict(colors=(dict(color="red"), dict(color="green"),
+                     dict(color="blue"))),
+                "red, green, blue"),
+            # More repeats.
+            ("buy {=count} articles: {#articles {=nam} txt {=pri}, }", {
+                "count": 2,
+                "articles": ({"nam": "Ur", "pri": 1}, {"nam": "Mo", "pri": 2})
+                },
+                "buy 2 articles: Ur txt 1, Mo txt 2, "),
+
+            ("sell {=count} stocks: {#articles {=nam} &euro; {=pri}{/comma , }}",
+                {"count": 2, "articles": ({"nam": "APPL", "pri": 320}, {"nam": "GOOG", "pri": 120})},
+                "sell 2 stocks: APPL &euro; 320, GOOG &euro; 120"),
+            # Nested repeats.
+            ("Contents: {#chapters Chapter {=name}. {#sections Section {=name}. }",
+                {
+                    "chapters": [
+                        dict(name="Intro", sections=[dict(name="Foreword"), dict(name="Methodology")]),
+                        dict(name="Middle", sections=[dict(name="Measuring"), dict(name="Calculation"), dict(name="Results")]),
+                        dict(name="Epilogue", sections=[dict(name="Conclusion")])
+                        ]
+                    },
+                "Contents: Chapter Intro. Section Foreword. Section Methodology. "
+                "Chapter Middle. Section Measuring. Section Calculation. Section Results. "
+                "Chapter Epilogue. Section Conclusion. "),
+            # Condition with repeat.
+            ("Dear {=name}, {?market Please get the following groceries:\n"
+                "{#groceries \tItem: {=item}, {=count} pieces\n}}"
+                "{?deadline Please be back before {=time}!}",
+                {"name": "Joe",
+                 "market": "True",
+                 "count": 5,
+                 "groceries": [dict(item="lemon", count=2), dict(item="cookies", count=4)],
+                 "deadline": True,
+                 "time": "17:30",
+                 },
+                "Dear Joe, Please get the following groceries:\n\tItem: "
+                "lemon, 2 pieces\n\tItem: cookies, 4 pieces\nPlease be "
+                "back before 17:30!"),
+
+            # Tests for Setter.
+            ("{:age 42}The Universe is {=age} years old",
+                {},
+                "The Universe is 42 years old"),
+
+            # Tests for Counter.
+            ("{|nr Shouldnotappear_with_empty_list}",
+                {"nr": []},
+                ""),
+            ("{|nr Shouldappear_with_list_with_only_one_item}",
+                {"nr": ["one"]},
+                "Shouldappear_with_list_with_only_one_item"),
+            ("{|nr Should_not_appear_with_list_of_two_items_or_more}",
+                {"nr": ["one", "two"]},
+                ""),
+
+            ("{+nr Should_not_appear_with_empty_list}",
+                {"nr": []},
+                ""),
+            ("{+nr Should_not_appear_with_list_with_only_one_item}",
+                {"nr": ["one"]},
+                ""),
+            ("{+nr Should_appear_with_list_of_two_items_or_more}",
+                {"nr": ["one", "two"]},
+                "Should_appear_with_list_of_two_items_or_more"),
+
+            # Tests voor External.
+            #("{$file templates/nl/unittest-helper.tpl}",  # Include mét variabele expansie.
+            #    {"age": 42},
+            #    "Voor gebruik in unittests van ovotemplate. Het Universum is 42 jaar oud.\n"),
+            #
+            #("{$verb templates/nl/unittest-helper.tpl}",  # Include zonder variabele expansie, bv. voor Javascript, ivm de { en } tekens.
+            #    {"age": 42},
+            #    "Voor gebruik in unittests van ovotemplate. Het Universum is {=age} jaar oud.\n"),
+            )
+
+        for tems, temv, expected in goodcases:
+            tem = Ovotemplate(tems)  # tem.pprint()
+            self.assertEqual(tem.render(temv), expected)
+
+        ''' TODO: This still needs some work - sensible error reporting.
+        badcases = (
+            ("{#a {=b} {=c}}", {}), # required variables missing
+            ("=a}", dict(a=42)), # missing opening {
+            # ("{=a", dict(a=42)), # missing closing {
+            )
+
+        global exceptionless
+        exceptionless = False
+        for tems, temv in badcases:
+            self.assertRaises(Exception, Ovotemplate(tems).render(temv))
+        '''
+
+    def test_namedtuple(self):
+        import collections
+        Entry = collections.namedtuple("Entry", ["name", "telephone"])
+        phonebook = [Entry("Mary", "0203898"), Entry("Jan", "0683928")]
+        tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
+        self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
+
+    def test_bunch(self):
+        from bunch import Bunch
+        phonebook = [Bunch({"name": "Mary", "telephone": "0203898"}), Bunch({"name": "Jan", "telephone": "0683928"})]
+        tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
+        self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
+
+
+def acquire(context, pathelems, usebraces=True):
+    fn = os.path.join("templates", *pathelems) + ".tpl"
+    tpl = Ovotemplate(usebraces=usebraces).fromfile(fn)
+    return tpl.render(context)
+
+
+def test_performance():
+    """Ovotemplate and Jinja2 go head-to-head!
+    Result for nr=150 on my MacBook Air:
+        Ovotemplate: 467MB produced in 66.237 sec
+        Jinja2: 470MB produced in 156.205 sec
+    """
+    import time
+    nr = 2
+    books = []
+    d = {"books": books}
+    for booknr in range(nr):
+        chapters = []
+        book = dict(title="%d bottles of beer" % booknr, toc="This will be the table of contents.", chapters=chapters)
+        books.append(book)
+        for chapternr in range(nr):
+            sections = []
+            chapter = dict(title="%d. How to drink beer" % chapternr, intro="This will be an intro", sections=sections)
+            chapters.append(chapter)
+            for sectionnr in range(nr):
+                section = dict(title="%d. Procedure" % sectionnr, text="This will be an explanation of how to drink beer.")
+                sections.append(section)
+    tem = Ovotemplate("""
+        {#books
+            <h1>The Book Of {=title}</h1>
+            <p>{=toc}</p>
+            {#chapters
+                <h2>Chapter {=title}</h2>
+                <p>{=intro}</p>
+                {#sections
+                    <h3>Section {=title}</h3>
+                    <p>{=text}</p>
+                }
+            }
+        }
+        """)
+    start = time.time()
+    res = tem.render(d)
+    dur = time.time() - start
+    print("Ovotemplate: %dMB produced in %.3f sec:" % (len(res) / 1024 / 1024, dur))
+    if nr < 3:
+        print(res)
+    #
+    from jinja2 import Template
+    tem = Template("""
+        {% for book in books %}
+            <h1>The Book Of {{book.title}}</h2>
+            <p>{{book.toc}}</p>
+            {% for chapter in book.chapters %}
+                <h2>Chapter {{chapter.title}}</h2>
+                <p>{{chapter.intro}}</p>
+                {% for section in chapter.sections %}
+                    <h3>Section {{section.title}}</h3>
+                    <p>{{section.text}}</p>
+                {% endfor %}
+            {% endfor %}
+        {% endfor %}
+        """)
+    start = time.time()
+    res = tem.render(dict(books=books))
+    dur = time.time() - start
+    print("Jinja2: %dMB produced in %.3f sec:" % (len(res) / 1024 / 1024, dur))
+    if nr < 3:
+        print(res)
+
+
+if __name__ == "__main__":
+    # For the usual unittests:
+    unittest.main()
+
+    # Uncomment for a benchmark comparison:
+    # test_performance()
+
+    # res = Ovotemplate("Hello {=name}").render(dict(name="Jan"))
+    # print(res)
+
