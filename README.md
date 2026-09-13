@@ -166,13 +166,41 @@ en `<style>` als plekken waar je contextdata zelf moet valideren.
 
 Twee dingen daarnaast, die los van escaping staan:
 
-- `{$file}` en `{$verb}` openen elk pad dat uit de template rolt, inclusief een
-  pad dat via `{=naam}` uit je context komt. `{$verb {=pad}}` met een
-  context-gestuurde `pad` is dus willekeurige bestandstoegang.
+- `{$file}` en `{$verb}` openen standaard elk pad dat uit de template rolt,
+  inclusief een pad dat via `{=naam}` uit je context komt. Zet `templateroot`
+  zodra dat kan gebeuren — zie hieronder.
 
 Foutmeldingen zelf zijn wél dicht: `errorspan()` escapet zijn boodschap, dus een
 templatenaam of variabelenaam die uit een verzoek komt kan er geen markup in
 smokkelen.
+
+### Includes opsluiten
+
+`templateroot` sluit `{$file}` en `{$verb}` op in één map:
+
+```python
+ovotemplate.templateroot = "/srv/app/templates"   # of: OVOTEMPLATE_ROOT=...
+```
+
+Een relatief pad wordt dan tegen die root opgelost, en alles wat er buiten
+uitkomt gaat de deur uit — of dat nu via `..`, een absoluut pad of een symlink
+gebeurt, want er wordt op `realpath()` vergeleken:
+
+```
+{$file nl/deel.tpl}                      ->  Universum: 42 jaar
+{$verb /srv/app/templates/nl/deel.tpl}   ->  Universum: {=age} jaar
+{$verb ../geheim.txt}                    ->  Template error ... outside the template root
+{$verb nl/../../geheim.txt}              ->  Template error ... outside the template root
+{$verb /etc/passwd}                      ->  Template error ... outside the template root
+{$verb sluipweg.txt}                     ->  Template error ... outside the template root
+{$verb {=pad}}  met pad='../geheim.txt'  ->  Template error ... outside the template root
+```
+
+Standaard staat `templateroot` op `None`, wat de oude onbeperkte werking geeft.
+Zet je hem op `"."`, dan blijven bestaande templates die `{$file templates/nl/x.tpl}`
+schrijven gewoon werken en kun je er alleen niet meer je projectmap uit.
+
+Met `exceptionless = False` krijg je een `ForbiddenPath` in plaats van een span.
 
 Kortom: escaping sluit de meest voorkomende deur — data die als tekst in HTML
 belandt — maar maakt de engine niet vanzelf veilig. Contextbewuste escaping,
@@ -239,6 +267,7 @@ offerte.tpl, line 1, column 17: ['%']]]
 |---|---|---|---|
 | `autoescape` | `True` | `OVOTEMPLATE_AUTOESCAPE` | HTML-escaping van substituties |
 | `strictvars` | `False` | `OVOTEMPLATE_STRICT` | onbekende variabelen melden |
+| `templateroot` | `None` | `OVOTEMPLATE_ROOT` | sluit `{$file}`/`{$verb}` op in één map |
 | `exceptionless` | `True` | — | foutspan in plaats van exception |
 | `verbose` | `False` | — | vertelt luidruchtig wat hij doet |
 

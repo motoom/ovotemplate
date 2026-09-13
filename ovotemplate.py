@@ -40,6 +40,12 @@ autoescape = envflag("OVOTEMPLATE_AUTOESCAPE", default=True)
 # "ovotemplate.strictvars = settings.DEBUG" - assigning to it always wins over the environment.
 strictvars = envflag("OVOTEMPLATE_STRICT")
 
+# None: {$file} and {$verb} open whatever path the template produces. Set to a directory
+# (or OVOTEMPLATE_ROOT=/srv/app/templates) to confine them: a relative include is resolved
+# against the root, and anything that ends up outside it - via .., an absolute path or a
+# symlink - is refused. Worth setting whenever an include path can contain a substitution.
+templateroot = os.environ.get("OVOTEMPLATE_ROOT") or None
+
 MISSING = object()  # Sentinel: distinguishes "no default given" from a default of None.
 
 
@@ -106,6 +112,10 @@ class Raw(str):
     Setters produce these, so that {:x <b>hi</b>}{=x} keeps working under autoescape."""
 
 
+class ForbiddenPath(Exception):
+    "An external include tried to reach a file outside templateroot."
+
+
 class UnbalancedBrace(Exception):
     """A template has an opening brace without a matching closing one, or the other way round.
     Carries the position of the offending brace; process() fills in the template name."""
@@ -129,6 +139,22 @@ def escape(value):
     if isinstance(value, Raw):
         return value
     return html.escape(value, quote=True)
+
+
+def resolvepath(filename):
+    """Turn an include path into a path that may actually be opened.
+    With templateroot unset the path is used as given, which is how this always worked.
+    With it set, a relative path is resolved against the root and the result must lie
+    inside it; realpath() is what makes .. and symlinks unable to sneak out."""
+    if templateroot is None:
+        return filename
+    root = os.path.realpath(templateroot)
+    # join() lets an absolute filename win, so absolute paths are allowed - but only
+    # if they survive the containment check below.
+    full = os.path.realpath(os.path.join(root, filename))
+    if full != root and not full.startswith(root + os.sep):
+        raise ForbiddenPath("'%s' is outside the template root '%s'" % (filename, templateroot))
+    return full
 
 
 def errorspan(msg):
@@ -273,25 +299,30 @@ class External(Container):
         return super(External, self).__repr__()
 
     def render(self, vars, last, level):
-        if "file" in self.type:
-            output = self.renderfile(vars, last, level, self.usebraces)
-        elif "verb" in self.type:
-            output = self.renderverb(vars, last, level)
-        else:
-            output = errorspan(errormessage('"%s" is an unknown external source-type' % self.type, "External", self.where()))
+        try:
+            if "file" in self.type:
+                output = self.renderfile(vars, last, level, self.usebraces)
+            elif "verb" in self.type:
+                output = self.renderverb(vars, last, level)
+            else:
+                output = errorspan(errormessage('"%s" is an unknown external source-type' % self.type, "External", self.where()))
+        except ForbiddenPath as e:
+            if not exceptionless:
+                raise
+            output = errorspan(errormessage(str(e), "External", self.where()))
         return output
 
     def renderinner(self, vars, last, level):
         return self.renderchildren(vars, last, level)
 
     def renderverb(self, vars, last, level):
-        filename = self.renderinner(vars, last, level)
+        filename = resolvepath(self.renderinner(vars, last, level))
         with open(filename, "r") as f:
             s = f.read()
         return s
 
     def renderfile(self, vars, last, level, usebraces):
-        filename = self.renderinner(vars, last, level)
+        filename = resolvepath(self.renderinner(vars, last, level))
         tpl = Ovotemplate(usebraces=usebraces).fromfile(filename)
         output = tpl.render(vars)
         return output
@@ -1110,6 +1141,59 @@ class Test(unittest.TestCase):
                 self.fail("expected a KeyError")
         finally:
             strictvars, exceptionless = previousstrict, previousexc
+
+    def test_templateroot(self):
+        """With templateroot set, an include cannot reach outside it."""
+        import shutil
+        import tempfile
+
+        global templateroot, exceptionless
+        previousroot, previousexc = templateroot, exceptionless
+        base = tempfile.mkdtemp()
+        try:
+            root = os.path.join(base, "templates")
+            os.mkdir(root)
+            os.mkdir(os.path.join(root, "nl"))
+            with open(os.path.join(root, "nl", "deel.tpl"), "w") as f:
+                f.write("Het Universum is {=age} jaar oud.")
+            secret = os.path.join(base, "geheim.txt")
+            with open(secret, "w") as f:
+                f.write("GEHEIM")
+
+            templateroot = None
+            # Unrestricted, the old behaviour: any path at all, including outside.
+            self.assertEqual(Ovotemplate("{$verb %s}" % secret).render({}), "GEHEIM")
+
+            templateroot = root
+            # A relative include is resolved against the root.
+            self.assertEqual(Ovotemplate("{$file nl/deel.tpl}").render({"age": 42}),
+                             "Het Universum is 42 jaar oud.")
+            self.assertEqual(Ovotemplate("{$verb nl/deel.tpl}").render({}),
+                             "Het Universum is {=age} jaar oud.")
+            # An absolute path inside the root is fine.
+            self.assertEqual(Ovotemplate("{$verb %s}" % os.path.join(root, "nl", "deel.tpl")).render({}),
+                             "Het Universum is {=age} jaar oud.")
+            # Escaping the root is not, in any of its guises.
+            for escape in ("../geheim.txt", "nl/../../geheim.txt", secret):
+                out = Ovotemplate("{$verb %s}" % escape).render({})
+                self.assertNotIn("GEHEIM", out, "%r should not have been readable" % escape)
+                self.assertIn("outside the template root", html.unescape(out))
+            # A symlink pointing out of the root does not help either.
+            link = os.path.join(root, "sluipweg.txt")
+            os.symlink(secret, link)
+            out = Ovotemplate("{$verb sluipweg.txt}").render({})
+            self.assertNotIn("GEHEIM", out)
+            self.assertIn("outside the template root", html.unescape(out))
+            # A path built from context data goes through the same check.
+            out = Ovotemplate("{$verb {=pad}}").render({"pad": "../geheim.txt"})
+            self.assertNotIn("GEHEIM", out)
+
+            # With exceptionless off it raises instead of rendering a span.
+            exceptionless = False
+            self.assertRaises(ForbiddenPath, Ovotemplate("{$verb ../geheim.txt}").render, {})
+        finally:
+            templateroot, exceptionless = previousroot, previousexc
+            shutil.rmtree(base, ignore_errors=True)
 
     def test_autoescape(self):
         """Substituted values are HTML-escaped, so context data cannot inject markup."""
