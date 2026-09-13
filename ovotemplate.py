@@ -1198,14 +1198,31 @@ def acquire(context, pathelems, usebraces=True):
     return tpl.render(context)
 
 
-def test_performance():
-    """Ovotemplate and Jinja2 go head-to-head!
-    Result for nr=150 on my MacBook Air:
-        Ovotemplate: 467MB produced in 66.237 sec
-        Jinja2: 470MB produced in 156.205 sec
+def test_performance(nr=40, repeats=5):
+    """Ovotemplate and Jinja2 go head-to-head, escaping on both sides.
+
+    The comparison is only fair if both engines do the same work: Jinja2's bare
+    Template() does not escape, while Ovotemplate does since autoescape landed,
+    so this measures both engines in both modes. Compilation happens up front;
+    only rendering is timed, best of `repeats` runs.
+
+    Measured on an Apple Silicon laptop, Python 3.14.7 / Jinja2 3.1.6,
+    nr=40 (64000 sections, 8.98 MB of output):
+
+        Ovotemplate  escaping off   0.074 sec
+        Jinja2       escaping off   0.054 sec
+        Ovotemplate  escaping on    0.111 sec
+        Jinja2       escaping on    0.101 sec
+
+    So the two are within about ten percent of each other once both escape.
+    An earlier note here claimed Ovotemplate was over twice as fast (467MB in
+    66.237 sec against Jinja2's 156.205 sec on a MacBook Air); Jinja2 compiles
+    templates to Python bytecode and has closed that gap since. Escaping costs
+    Ovotemplate roughly half again as much time, which is 37 ms on 9 MB.
     """
     import time
-    nr = 2
+    from jinja2 import Template
+
     books = []
     d = {"books": books}
     for booknr in range(nr):
@@ -1219,7 +1236,8 @@ def test_performance():
             for sectionnr in range(nr):
                 section = dict(title="%d. Procedure" % sectionnr, text="This will be an explanation of how to drink beer.")
                 sections.append(section)
-    tem = Ovotemplate("""
+
+    ovo = Ovotemplate("""
         {#books
             <h1>The Book Of {=title}</h1>
             <p>{=toc}</p>
@@ -1233,17 +1251,9 @@ def test_performance():
             }
         }
         """)
-    start = time.time()
-    res = tem.render(d)
-    dur = time.time() - start
-    print("Ovotemplate: %dMB produced in %.3f sec:" % (len(res) / 1024 / 1024, dur))
-    if nr < 3:
-        print(res)
-    #
-    from jinja2 import Template
-    tem = Template("""
+    jinjasource = """
         {% for book in books %}
-            <h1>The Book Of {{book.title}}</h2>
+            <h1>The Book Of {{book.title}}</h1>
             <p>{{book.toc}}</p>
             {% for chapter in book.chapters %}
                 <h2>Chapter {{chapter.title}}</h2>
@@ -1254,13 +1264,36 @@ def test_performance():
                 {% endfor %}
             {% endfor %}
         {% endfor %}
-        """)
-    start = time.time()
-    res = tem.render(dict(books=books))
-    dur = time.time() - start
-    print("Jinja2: %dMB produced in %.3f sec:" % (len(res) / 1024 / 1024, dur))
+        """
+
+    def fastest(render):
+        "Best of `repeats` runs, to squeeze out scheduling noise."
+        best = None
+        for _ in range(repeats):
+            start = time.perf_counter()
+            result = render()
+            elapsed = time.perf_counter() - start
+            if best is None or elapsed < best:
+                best, output = elapsed, result
+        return best, output
+
+    global autoescape
+    previous = autoescape
+    runs = []
+    try:
+        for escaping in (False, True):
+            autoescape = escaping
+            runs.append(("Ovotemplate", escaping) + fastest(lambda: ovo.render(d)))
+            jinja = Template(jinjasource, autoescape=escaping)
+            runs.append(("Jinja2", escaping) + fastest(lambda: jinja.render(books=books)))
+    finally:
+        autoescape = previous
+
+    print("%d sections, %.2f MB of output, best of %d" % (nr ** 3, len(runs[0][3]) / 1024 / 1024, repeats))
+    for engine, escaping, elapsed, output in runs:
+        print("    %-12s escaping %-3s %7.3f sec" % (engine, "on" if escaping else "off", elapsed))
     if nr < 3:
-        print(res)
+        print(runs[0][3])
 
 
 if __name__ == "__main__":
