@@ -3,10 +3,12 @@
 # TODO: String-only mode
 # TODO: in template ook members kunnen accessen: {=cursus.lesvorm}, scheelt weer.
 
+import io
 import os
 import pprint
 import re
 import html
+import json
 import unittest
 import functools
 import datetime
@@ -712,13 +714,63 @@ class Test(unittest.TestCase):
         tem = Ovotemplate("Hello, «=name»!", "nametest", usebraces=False) # Note that unicode must be used here
         self.assertEqual(tem.render(dict(name="world")), "Hello, world!")
 
-    def DISABLED_test_alternatebraces_extern(self):
-        tem = Ovotemplate("«$verb templates/nl/unittest-helper-guillemets.tpl»", {}, usebraces=False)
-        res = tem.render({"age": 42})
-        self.assertEqual(res, "Voor gebruik in unittests van ovotemplate. Het Universum is «=age» jaar oud.\n")
-        tem = Ovotemplate("«$file templates/nl/unittest-helper-guillemets.tpl»", {}, usebraces=False)
-        res = tem.render({"age": 42})
-        self.assertEqual(res, "Voor gebruik in unittests van ovotemplate. Het Universum is 42 jaar oud.\n")
+    def test_guillemets_for_javascript(self):
+        """Why guillemets exist: a template holding JavaScript is full of braces,
+        and with {} as the delimiters the lexer eats them."""
+        source = (
+            "<script>\n"
+            "function groet(naam) {\n"
+            "    if (naam) { alert(\"Hallo \" + naam); }\n"
+            "}\n"
+            "groet(\"%s\");\n"
+            "</script>"
+        )
+        expected = source % "Jan"  # The JavaScript braces must survive untouched.
+
+        # With guillemets the braces are just text and only «=naam» is a substitution.
+        self.assertEqual(Ovotemplate(source % "«=naam»", usebraces=False).render({"naam": "Jan"}),
+                         expected)
+
+        # With the default braces the same template falls apart, and says where.
+        broken = Ovotemplate(source % "{=naam}").render({"naam": "Jan"})
+        self.assertIn("without a following valid metachar", html.unescape(broken))
+        self.assertIn("line 2, column 22", html.unescape(broken))  # the { of "function groet(naam) {"
+
+        # Escaping still applies inside a script element, and that is a trap: HTML
+        # entities are not decoded there, so the JavaScript receives them literally.
+        # Encode such a value in Python (json.dumps) and insert it with «=!name».
+        self.assertEqual(Ovotemplate('var x = "«=v»";', usebraces=False).render({"v": 'O"Brien'}),
+                         'var x = "O&quot;Brien";')
+        self.assertEqual(Ovotemplate("var x = «=!v»;", usebraces=False).render({"v": json.dumps('O"Brien')}),
+                         'var x = "O\\"Brien";')
+
+    def test_alternatebraces_extern(self):
+        """{$file} and {$verb} in guillemets mode: the included template is parsed
+        with the same delimiters as the one including it."""
+        import shutil
+        import tempfile
+
+        global templateroot
+        previous = templateroot
+        root = tempfile.mkdtemp()
+        try:
+            helper = "Voor gebruik in unittests van ovotemplate. Het Universum is «=age» jaar oud.\n"
+            with io.open(os.path.join(root, "helper.tpl"), "w", encoding="utf-8") as f:
+                f.write(helper)
+            templateroot = root
+
+            # $verb inserts the file as it stands, so the substitution is not expanded.
+            self.assertEqual(Ovotemplate("«$verb helper.tpl»", usebraces=False).render({"age": 42}),
+                             helper)
+            # $file compiles the included template, in guillemets mode as well.
+            self.assertEqual(Ovotemplate("«$file helper.tpl»", usebraces=False).render({"age": 42}),
+                             "Voor gebruik in unittests van ovotemplate. Het Universum is 42 jaar oud.\n")
+            # An unknown source type is reported, guillemets and all.
+            self.assertIn("unknown external source-type",
+                          html.unescape(Ovotemplate("«$nosuch helper.tpl»", usebraces=False).render({})))
+        finally:
+            templateroot = previous
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_splitting(self):
         self.assertEqual(splitfirst(""), ("", ""))

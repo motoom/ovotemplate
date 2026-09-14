@@ -44,10 +44,32 @@ gewoon alles. Een `{/scheiding}` binnen een bereik stopt aan het eind van het
 bereik, niet aan het eind van de lijst.
 
 Zitten er accolades in je uitvoer — JavaScript, CSS — dan kun je de engine op
-guillemets zetten:
+guillemets zetten. Dát is waar ze voor bedoeld zijn: met `{}` als delimiter eet
+de lexer je JavaScript op.
 
 ```python
-Ovotemplate("Hallo «=naam»!", usebraces=False)
+Ovotemplate(bron, usebraces=False)
+```
+
+```html
+<script>
+function groet(naam) {
+    if (naam) { alert("Hallo " + naam); }
+}
+groet("«=naam»");
+</script>
+```
+
+Met accolades sneuvelt dat op regel 2, kolom 22 — bij de `{` van `function
+groet(naam) {`. Met guillemets zijn die accolades gewone tekst en is alleen
+`«=naam»` een substitutie.
+
+Let wel op de escaping-val: entiteiten worden binnen een `<script>`-element níét
+gedecodeerd, dus `«=v»` met een aanhalingsteken erin levert letterlijk `&quot;`
+op in je JavaScript. Codeer zo'n waarde in Python en laat hem ongeëscaped door:
+
+```python
+render({"v": json.dumps(waarde)})     # in de template: var x = «=!v»;
 ```
 
 ## Wat je als context mag meegeven
