@@ -1,5 +1,7 @@
 # Ovotemplate
 
+[![tests](https://github.com/motoom/ovotemplate/actions/workflows/tests.yml/badge.svg)](https://github.com/motoom/ovotemplate/actions/workflows/tests.yml)
+
 Een templating-engine van één bestand, zonder dependencies, met een syntaxis
 die in één tabel past.
 

@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # One old Python falling over should not hide the others.
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    name: Python ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # No install step: ovotemplate imports nothing outside the standard library,
+      # and the tests only reach for bunch.py, which lives right next to it.
+      - name: Run the test suite
+        run: python -m unittest ovotemplate -v
+
+      - name: Check for syntax warnings
+        run: python -W error::SyntaxWarning -c "import ovotemplate, bunch"
