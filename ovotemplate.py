@@ -183,8 +183,9 @@ def undefined(kind, name, where=""):
 
 
 def lookup(vars, name, default=MISSING):
-    """Fetch 'name' from a render context, which may be a mapping (dict, Box)
-    or an object with attributes (namedtuple, model instance, ...).
+    """Fetch 'name' from a render context, which may be a mapping (a dict, or any
+    mapping that also allows attribute access) or an object with attributes
+    (namedtuple, model instance, ...).
     Computed properties on the context's class are found too, so that presentation
     logic can live in a model (Rectangle.area) instead of in the template.
     Returns 'default' if absent; raises KeyError if absent and no default was given."""
@@ -192,7 +193,7 @@ def lookup(vars, name, default=MISSING):
         return vars[name]
     except KeyError:
         # A mapping, but without this key. A property on the class is still worth
-        # trying; plain methods (dict.items, Box.get) deliberately are not, so that
+        # trying; plain methods (dict.items, dict.get) deliberately are not, so that
         # a typo in a variable name keeps producing an error instead of a bound method.
         if isinstance(getattr(type(vars), name, None), property):
             return getattr(vars, name)
@@ -690,15 +691,22 @@ class Ovotemplate(object):
 class Test(unittest.TestCase):
     """Unittest for Ovotemplate."""
 
-    def box(self):
-        """Return box.Box, or skip. python-box is a test dependency only: ovotemplate
-        itself imports nothing outside the standard library, so a copy installed
-        without the test extra runs these tests as skips."""
-        try:
-            from box import Box
-        except ImportError:  # pragma: no cover - only without the test extra
-            self.skipTest("python-box is not installed; it is a test dependency (pip install python-box)")
-        return Box
+    class AttrDict(dict):
+        """A mapping that also allows attribute access - the shape of every
+        dict-wrapper going around, and the one context type that dicts and
+        namedtuples between them do not cover."""
+
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError:
+                raise AttributeError(name)
+
+    class InventingDict(AttrDict):
+        "Answers to any name at all, the way a default-valued mapping does."
+
+        def __getattr__(self, name):
+            return self.get(name)
 
     def test_naming(self):
         """Test the naming; every template instance can have a name (usually the filename where it was loaded from).
@@ -1054,22 +1062,20 @@ class Test(unittest.TestCase):
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
 
-    def test_box(self):
-        Box = self.box()
-        phonebook = [Box({"name": "Mary", "telephone": "0203898"}), Box({"name": "Jan", "telephone": "0683928"})]
+    def test_attribute_mapping(self):
+        """A mapping that also allows attribute access works as a context."""
+        phonebook = [self.AttrDict(name="Mary", telephone="0203898"),
+                     self.AttrDict(name="Jan", telephone="0683928")]
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
 
     def test_undefined_lenient(self):
         """By default an unknown variable renders as nothing, like Jinja2's Undefined."""
-        Box = self.box()
-
         self.assertEqual(Ovotemplate("[{=missing}]").render({}), "[]")
         self.assertEqual(Ovotemplate("[{=missing}]").render({"other": 1}), "[]")
-        # Same for objects, whether or not they invent a value for unknown attributes.
-        self.assertEqual(Ovotemplate("[{=missing}]").render(Box(other=1)), "[]")
-        # A Box that invents a value for every key renders as nothing just the same.
-        self.assertEqual(Ovotemplate("[{=age}]").render(Box(default_box=True, name="Joe")), "[]")
+        # Same for objects, whether or not they invent a value for unknown names.
+        self.assertEqual(Ovotemplate("[{=missing}]").render(self.AttrDict(other=1)), "[]")
+        self.assertEqual(Ovotemplate("[{=age}]").render(self.InventingDict(name="Joe")), "[]")
         # An explicit None renders as nothing too - note that Jinja2 writes "None" here.
         self.assertEqual(Ovotemplate("[{=v}]").render({"v": None}), "[]")
         # Conditions treat a missing name as False, so {!name ...} means "if not set".
@@ -1359,9 +1365,7 @@ class Test(unittest.TestCase):
     def test_properties(self):
         """Computed properties on the context object are usable as template variables,
         in substitutions as well as in conditions and repetitions."""
-        Box = self.box()
-
-        class Rectangle(Box):
+        class Rectangle(self.AttrDict):
             "A context object that computes some of its values instead of storing them."
 
             @property

@@ -83,7 +83,7 @@ tem = Ovotemplate("{=naam}")
 
 tem.render({"naam": "Mary"})                      # dict
 tem.render(Entry(naam="Mary"))                    # namedtuple
-tem.render(Box(naam="Mary"))                      # box.Box, of elke mapping
+tem.render(wrapper)                               # elke mapping met attribuuttoegang
 tem.render(rechthoek)                             # elk object
 ```
 
@@ -91,7 +91,7 @@ Berekende `@property`-members tellen mee. Dat is met opzet: presentatielogica
 hoort in je model, niet in je template.
 
 ```python
-class Rectangle(Box):
+class Rectangle(AttrDict):
     @property
     def area(self):
         return self.width * self.height
@@ -352,13 +352,7 @@ Ran 17 tests in 0.003s
 OK
 ```
 
-Drie tests gebruiken [python-box](https://github.com/cdgriffith/Box) om te
-controleren dat een attribuut-achtige mapping als context werkt. Dat is de enige
-testafhankelijkheid, en zonder die module slaan ze over in plaats van te falen:
-
-```
-pip install ovotemplate[test]
-```
+De suite heeft geen enkele afhankelijkheid en brengt zijn eigen fixtures mee.
 
 ## Snelheid
 

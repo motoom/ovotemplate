@@ -22,13 +22,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # ovotemplate itself needs nothing; the extra pulls in python-box for the
-      # tests, and installing the project here also proves pyproject.toml builds.
-      - name: Install the test dependencies
-        run: python -m pip install --quiet ".[test]"
-
+      # Nothing to install for the tests: ovotemplate imports nothing outside the
+      # standard library and the suite brings its own fixtures.
       - name: Run the test suite
         run: python -m unittest ovotemplate -v
+
+      # Not needed to run the tests, but it keeps pyproject.toml honest.
+      - name: Check that the package builds
+        run: python -m pip install --quiet .
 
       - name: Check for syntax warnings
         run: python -W error::SyntaxWarning -c "import ovotemplate"

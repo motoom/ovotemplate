@@ -28,11 +28,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-[project.optional-dependencies]
-# ovotemplate itself needs nothing; python-box only backs the tests that check
-# that an attribute-style mapping works as a render context.
-test = ["python-box"]
-
 [project.urls]
 Homepage = "https://github.com/motoom/ovotemplate"
 Source = "https://github.com/motoom/ovotemplate"
