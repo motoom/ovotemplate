@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # TODO: String-only mode
-# TODO: in template ook members kunnen accessen: {=cursus.lesvorm}, scheelt weer.
+# TODO: in template ook members kunnen accessen: {=order.customer}, scheelt weer.
 
 import io
 import os
@@ -184,7 +184,7 @@ def lookup(vars, name, default=MISSING):
     """Fetch 'name' from a render context, which may be a mapping (dict, Bunch)
     or an object with attributes (namedtuple, model instance, ...).
     Computed properties on the context's class are found too, so that presentation
-    logic can live in a model (Cursus.duration) instead of in the template.
+    logic can live in a model (Rectangle.area) instead of in the template.
     Returns 'default' if absent; raises KeyError if absent and no default was given."""
     try:
         return vars[name]
@@ -1300,44 +1300,63 @@ class Test(unittest.TestCase):
     def test_properties(self):
         """Computed properties on the context object are usable as template variables,
         in substitutions as well as in conditions and repetitions."""
-        from bunch import Cursus
+        from bunch import Bunch
 
-        def cursus(**kwargs):
-            defaults = dict(aantaldagen=3, aanschafeenheid="dag", aanschafeenheid_meervoud="dagen", lesvorm_naam="klassikaal")
-            defaults.update(kwargs)
-            return Cursus(**defaults)
+        class Rectangle(Bunch):
+            "A context object that computes some of its values instead of storing them."
 
-        # A property in a substitution.
-        klassikaal = cursus()
-        self.assertEqual(Ovotemplate("{=duration}").render(klassikaal), "3 dagen")
-        self.assertEqual(Ovotemplate("{=duration_long}").render(klassikaal), "3 trainingsdagen")
+            @property
+            def area(self):
+                return self.width * self.height
+
+            @property
+            def shape(self):
+                if self.width == self.height:
+                    return "square"
+                return "%d by %d rectangle" % (self.width, self.height)
+
+            @property
+            def issquare(self):
+                return self.width == self.height
+
+            @property
+            def warning(self):
+                if self.width > 100 or self.height > 100:
+                    return "Careful, this one is big."
+                return None
+
+        oblong = Rectangle(width=3, height=4)
+        square = Rectangle(width=5, height=5)
+
+        # A property in a substitution, including one that computes a number.
+        self.assertEqual(Ovotemplate("{=area}").render(oblong), "12")
+        self.assertEqual(Ovotemplate("{=shape}").render(oblong), "3 by 4 rectangle")
+        self.assertEqual(Ovotemplate("{=shape}").render(square), "square")
 
         # Properties driving the branches of a condition.
-        tem = Ovotemplate("{?toon_trainingsvormen VORMEN}{?custom_cta CTA}")
-        self.assertEqual(tem.render(klassikaal), "VORMEN")
-        self.assertEqual(tem.render(cursus(lesvorm_naam="coaching")), "CTA")
+        tem = Ovotemplate("{?issquare SQUARE}{!issquare OBLONG}")
+        self.assertEqual(tem.render(square), "SQUARE")
+        self.assertEqual(tem.render(oblong), "OBLONG")
 
         # A property returning None renders as nothing, like any other empty variable.
-        self.assertEqual(Ovotemplate("[{=custom_taal}]").render(klassikaal), "[]")
-        self.assertEqual(
-            Ovotemplate("[{=custom_taal}]").render(cursus(lesvorm_naam="scan")),
-            "[De scan kan eventueel verzorgd worden in het Engels.]")
+        self.assertEqual(Ovotemplate("[{=warning}]").render(oblong), "[]")
+        self.assertEqual(Ovotemplate("[{=warning}]").render(Rectangle(width=200, height=1)),
+                         "[Careful, this one is big.]")
 
         # Properties survive being reached through a repetition.
-        tem = Ovotemplate("{#cursussen {=lesvorm_naam}: {=duration}{/sep ; }}")
-        self.assertEqual(
-            tem.render(dict(cursussen=[cursus(), cursus(aantaldagen=1, lesvorm_naam="scan")])),
-            "klassikaal: 3 dagen; scan: 1 dag")
+        tem = Ovotemplate("{#shapes {=shape}: {=area}{/sep ; }}")
+        self.assertEqual(tem.render(dict(shapes=[oblong, square])),
+                         "3 by 4 rectangle: 12; square: 25")
 
         # Plain methods are NOT exposed; they must not leak into the output as a
         # repr of a bound method, whichever undefined-mode is in force.
-        self.assertEqual(Ovotemplate("{=get}").render(klassikaal), "")
+        self.assertEqual(Ovotemplate("{=get}").render(oblong), "")
         self.assertEqual(Ovotemplate("{=items}").render({"a": 1}), "")
         global strictvars
         previous = strictvars
         try:
             strictvars = True
-            self.assertIn("Template error", Ovotemplate("{=get}").render(klassikaal))
+            self.assertIn("Template error", Ovotemplate("{=get}").render(oblong))
             self.assertIn("Template error", Ovotemplate("{=items}").render({"a": 1}))
         finally:
             strictvars = previous

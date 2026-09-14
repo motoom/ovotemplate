@@ -71,48 +71,6 @@ def bunched(dicts):
     return tuple(Bunch(d) for d in dicts)
 
 
-class Cursus(DefaultBunch):
-    """Een cursus object, die alle properties bevat die van belang kunnen zijn voor een cursus.
-    Onder dit model breng ik langzaam maar zeker alle cursus gereleateerde berekeningen en properties onder,
-    zoals bijvoorbeeld prijsberekeningen, beschikbare plaatsen, etc.
-    Dit zorgt ervoor dat views skinny blijven en dat de business logica in de models blijft.
-    """
-    @property
-    def duration(self):
-        if self.aantaldagen == 1:
-            return f'1 {self.aanschafeenheid}'
-
-        return f'{self.aantaldagen} {self.aanschafeenheid_meervoud}'
-
-    @property
-    def duration_long(self):
-        if self.lesvorm_naam in ['scan', 'intervisie', 'coaching']:
-            return self.duration
-
-        if self.aantaldagen == 1:
-            return f'1 trainingsdag'
-
-        return f'{self.aantaldagen} trainingsdagen'
-
-    @property
-    def toon_trainingsvormen(self):
-        if self.lesvorm_naam in ['coaching', 'scan', 'intervisie']:
-            return False
-
-        return True
-
-    @property
-    def custom_cta(self):
-        return self.lesvorm_naam in ['coaching', 'scan', 'intervisie']
-
-    @property
-    def custom_taal(self):
-        if self.lesvorm_naam in ['scan', 'intervisie', 'coaching']:
-            return f'De {self.lesvorm_naam} kan eventueel verzorgd worden in het Engels.'
-
-        return None
-
-
 if __name__ == "__main__":
     # TODO: make proper unittest
 

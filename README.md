@@ -82,24 +82,28 @@ tem = Ovotemplate("{=naam}")
 tem.render({"naam": "Mary"})                      # dict
 tem.render(Entry(naam="Mary"))                    # namedtuple
 tem.render(Bunch(naam="Mary"))                    # bunch.Bunch
-tem.render(cursus)                                # elk object
+tem.render(rechthoek)                             # elk object
 ```
 
 Berekende `@property`-members tellen mee. Dat is met opzet: presentatielogica
 hoort in je model, niet in je template.
 
 ```python
-class Cursus(DefaultBunch):
+class Rectangle(Bunch):
     @property
-    def duration(self):
-        if self.aantaldagen == 1:
-            return f"1 {self.aanschafeenheid}"
-        return f"{self.aantaldagen} {self.aanschafeenheid_meervoud}"
+    def area(self):
+        return self.width * self.height
+
+    @property
+    def shape(self):
+        if self.width == self.height:
+            return "square"
+        return "%d by %d rectangle" % (self.width, self.height)
 ```
 
 ```python
->>> Ovotemplate("Duur: {=duration}").render(cursus)
-'Duur: 3 dagen'
+>>> Ovotemplate("{=shape}, oppervlak {=area}").render(Rectangle(width=3, height=4))
+'3 by 4 rectangle, oppervlak 12'
 ```
 
 Gewone methodes komen er níét doorheen. `{=items}` op een dict levert geen
