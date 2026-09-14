@@ -306,6 +306,16 @@ import ovotemplate
 ovotemplate.strictvars = settings.DEBUG
 ```
 
+## Installeren
+
+```
+pip install ovotemplate
+```
+
+Of gewoon `ovotemplate.py` naast je code zetten — het importeert niets buiten de
+standard library. `bunch.py` hoort bij de testsuite en zit niet in het pakket;
+zonder dat bestand slaat de suite drie tests over.
+
 ## Gebruik
 
 ```python

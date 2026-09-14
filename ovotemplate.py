@@ -13,6 +13,8 @@ import unittest
 import functools
 import datetime
 
+__version__ = "1.0.0"
+
 CHOPNAME = 1
 CHOPITEM = 2
 
@@ -686,6 +688,16 @@ class Ovotemplate(object):
 class Test(unittest.TestCase):
     """Unittest for Ovotemplate."""
 
+    def bunch(self):
+        """Import bunch, or skip. bunch.py lives beside ovotemplate.py in the
+        repository but is not part of the installed package, because the name is
+        taken on PyPI - so an installed copy runs these tests as skips."""
+        try:
+            import bunch
+        except ImportError:  # pragma: no cover - only on an installed copy
+            self.skipTest("bunch.py is not importable; it ships with the repository, not the package")
+        return bunch
+
     def test_naming(self):
         """Test the naming; every template instance can have a name (usually the filename where it was loaded from).
         This name is used in error reporting."""
@@ -1041,14 +1053,15 @@ class Test(unittest.TestCase):
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
 
     def test_bunch(self):
-        from bunch import Bunch
+        Bunch = self.bunch().Bunch
         phonebook = [Bunch({"name": "Mary", "telephone": "0203898"}), Bunch({"name": "Jan", "telephone": "0683928"})]
         tem = Ovotemplate("{#phonebook {=name} {=telephone}{/sep , }}")
         self.assertEqual(tem.render(dict(phonebook=phonebook)), "Mary 0203898, Jan 0683928")
 
     def test_undefined_lenient(self):
         """By default an unknown variable renders as nothing, like Jinja2's Undefined."""
-        from bunch import Bunch, DefaultBunch
+        bunch = self.bunch()
+        Bunch, DefaultBunch = bunch.Bunch, bunch.DefaultBunch
 
         self.assertEqual(Ovotemplate("[{=missing}]").render({}), "[]")
         self.assertEqual(Ovotemplate("[{=missing}]").render({"other": 1}), "[]")
@@ -1300,7 +1313,7 @@ class Test(unittest.TestCase):
     def test_properties(self):
         """Computed properties on the context object are usable as template variables,
         in substitutions as well as in conditions and repetitions."""
-        from bunch import Bunch
+        Bunch = self.bunch().Bunch
 
         class Rectangle(Bunch):
             "A context object that computes some of its values instead of storing them."
