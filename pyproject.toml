@@ -28,15 +28,17 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.optional-dependencies]
+# ovotemplate itself needs nothing; python-box only backs the tests that check
+# that an attribute-style mapping works as a render context.
+test = ["python-box"]
+
 [project.urls]
 Homepage = "https://github.com/motoom/ovotemplate"
 Source = "https://github.com/motoom/ovotemplate"
 Issues = "https://github.com/motoom/ovotemplate/issues"
 
 [tool.setuptools]
-# Only ovotemplate is installed. bunch.py stays in the repository for the test
-# suite: "bunch" is taken on PyPI, so installing a top-level module by that name
-# would collide with somebody else's package.
 py-modules = ["ovotemplate"]
 
 [tool.setuptools.dynamic]

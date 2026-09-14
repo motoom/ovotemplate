@@ -83,7 +83,7 @@ tem = Ovotemplate("{=naam}")
 
 tem.render({"naam": "Mary"})                      # dict
 tem.render(Entry(naam="Mary"))                    # namedtuple
-tem.render(Bunch(naam="Mary"))                    # bunch.Bunch
+tem.render(Box(naam="Mary"))                      # box.Box, of elke mapping
 tem.render(rechthoek)                             # elk object
 ```
 
@@ -91,7 +91,7 @@ Berekende `@property`-members tellen mee. Dat is met opzet: presentatielogica
 hoort in je model, niet in je template.
 
 ```python
-class Rectangle(Bunch):
+class Rectangle(Box):
     @property
     def area(self):
         return self.width * self.height
@@ -313,8 +313,7 @@ pip install ovotemplate
 ```
 
 Of gewoon `ovotemplate.py` naast je code zetten — het importeert niets buiten de
-standard library. `bunch.py` hoort bij de testsuite en zit niet in het pakket;
-zonder dat bestand slaat de suite drie tests over.
+standard library.
 
 ## Gebruik
 
@@ -353,7 +352,13 @@ Ran 17 tests in 0.003s
 OK
 ```
 
-`bunch.py` hoort erbij: de tests gebruiken het voor de context-varianten.
+Drie tests gebruiken [python-box](https://github.com/cdgriffith/Box) om te
+controleren dat een attribuut-achtige mapping als context werkt. Dat is de enige
+testafhankelijkheid, en zonder die module slaan ze over in plaats van te falen:
+
+```
+pip install ovotemplate[test]
+```
 
 ## Snelheid
 
