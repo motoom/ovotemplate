@@ -658,14 +658,16 @@ class Ovotemplate(object):
         else:
             self.root = None
 
-    def fromfile(self, fn):
+    def fromfile(self, fn, name=None):
         """Load a template from a file.
         Allows: tem = Ovotemplate().fromfile("hello.tpl")
-        The template file should contain UTF-8 encoded unicode text
+        The template file should contain UTF-8 encoded unicode text.
+        Pass 'name' to report a different path in error messages than the one opened,
+        so a resolved absolute path need not be shown to whoever sees the page.
         """
         with open(fn) as f:
             tpl = f.read()
-        self.name = fn.replace(" ", "_")
+        self.name = (name if name is not None else fn).replace(" ", "_")
         self.root = process(tpl, self.usebraces, self.openbrace, self.closebrace, self.name)
         return self
 
@@ -1260,6 +1262,50 @@ class Test(unittest.TestCase):
             templateroot, exceptionless = previousroot, previousexc
             shutil.rmtree(base, ignore_errors=True)
 
+    def test_acquire(self):
+        """acquire() keeps both the template it loads and the includes inside it
+        within its root, so path elements from a request cannot climb out."""
+        import shutil
+        import tempfile
+
+        global templateroot
+        previous = templateroot
+        base = tempfile.mkdtemp()
+        try:
+            root = os.path.join(base, "templates")
+            os.makedirs(os.path.join(root, "nl"))
+            with io.open(os.path.join(root, "nl", "pagina.tpl"), "w", encoding="utf-8") as f:
+                f.write("Hallo {=naam}!")
+            with io.open(os.path.join(root, "nl", "sluipen.tpl"), "w", encoding="utf-8") as f:
+                f.write("[{$verb ../../geheim.txt}]")
+            with io.open(os.path.join(base, "geheim.txt"), "w", encoding="utf-8") as f:
+                f.write("GEHEIM")
+
+            templateroot = None
+            self.assertEqual(acquire({"naam": "Jan"}, ["nl", "pagina"], root=root), "Hallo Jan!")
+
+            # Path elements cannot climb out, whichever way they try.
+            for pathelems in (["..", "geheim"], ["nl", "..", "..", "geheim"], [base, "geheim"]):
+                self.assertRaises(ForbiddenPath, acquire, {}, pathelems, root=root)
+
+            # Neither can an include inside the template that was loaded.
+            out = acquire({}, ["nl", "sluipen"], root=root)
+            self.assertNotIn("GEHEIM", out)
+            self.assertIn("outside the template root", html.unescape(out))
+
+            # The setting is left as it was found.
+            self.assertIsNone(templateroot)
+
+            # Errors name the template the way it was asked for, not where it lives.
+            with io.open(os.path.join(root, "nl", "stuk.tpl"), "w", encoding="utf-8") as f:
+                f.write("{&bad}")
+            out = html.unescape(acquire({}, ["nl", "stuk"], root=root))
+            self.assertIn("nl/stuk.tpl", out)
+            self.assertNotIn(base, out)
+        finally:
+            templateroot = previous
+            shutil.rmtree(base, ignore_errors=True)
+
     def test_autoescape(self):
         """Substituted values are HTML-escaped, so context data cannot inject markup."""
         evil = '<script>alert("xss")</script>'
@@ -1375,10 +1421,26 @@ class Test(unittest.TestCase):
             strictvars = previous
 
 
-def acquire(context, pathelems, usebraces=True):
-    fn = os.path.join("templates", *pathelems) + ".tpl"
-    tpl = Ovotemplate(usebraces=usebraces).fromfile(fn)
-    return tpl.render(context)
+def acquire(context, pathelems, usebraces=True, root=None):
+    """Load <root>/<pathelems>.tpl and render it with the given context.
+
+    The path is confined to the root: path elements that arrived from a request
+    cannot climb out of it with '..' or with an absolute path, and {$file}/{$verb}
+    inside the template are held to the same directory while it renders.
+    The root defaults to templateroot when that is set, and to "templates" otherwise;
+    a path that escapes raises ForbiddenPath.
+    """
+    global templateroot
+    previous = templateroot
+    templateroot = root or previous or "templates"
+    try:
+        relative = os.path.join("", *pathelems) + ".tpl"
+        # Open the resolved path, but keep reporting the relative one, so an error
+        # in the template does not disclose where on the server it lives.
+        tpl = Ovotemplate(usebraces=usebraces).fromfile(resolvepath(relative), name=relative)
+        return tpl.render(context)
+    finally:
+        templateroot = previous
 
 
 def test_performance(nr=40, repeats=5):

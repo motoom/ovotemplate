@@ -326,7 +326,24 @@ Ovotemplate().fromfile("hallo.tpl").render(context)         # uit een bestand
 ```
 
 Er is ook een `acquire(context, pathelems)` die een template uit `templates/`
-haalt en meteen rendert.
+haalt en meteen rendert:
+
+```python
+acquire({"naam": "Jan"}, ["nl", "pagina"])     # templates/nl/pagina.tpl
+```
+
+Die zet zijn eigen `templateroot` voor de duur van de render, dus padelementen
+uit een verzoek kunnen er niet uit klimmen en includes in de template evenmin:
+
+```
+acquire(ctx, ["..", "geheim"])            ->  ForbiddenPath
+acquire(ctx, ["nl", "..", "..", "x"])     ->  ForbiddenPath
+{$verb ../../geheim.txt} in de template   ->  Template error … outside the template root
+```
+
+Met `root=` wijs je een andere map aan; zonder dat volgt hij `templateroot`, en
+anders `templates/`. Foutmeldingen noemen de template zoals je hem opvroeg
+(`nl/pagina.tpl`), niet waar hij op de server staat.
 
 ## Tests
 
