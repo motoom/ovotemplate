@@ -1085,6 +1085,83 @@ class Test(unittest.TestCase):
         # A missing name does not swallow the rest of the template.
         self.assertEqual(Ovotemplate("A{=missing}B").render({}), "AB")
 
+    def test_datetime(self):
+        """A datetime value is formatted rather than blowing up on concatenation,
+        and it must do so at every nesting level, not just the outermost one."""
+        moment = datetime.datetime(2026, 1, 2, 9, 30, 15)
+        formatted = "2026-01-02 09:30:15"
+
+        self.assertEqual(Ovotemplate("{=d}").render({"d": moment}), formatted)
+        self.assertEqual(Ovotemplate("{?c {=d}}").render({"c": True, "d": moment}), formatted)
+        self.assertEqual(Ovotemplate("{#l {=d}}").render({"l": [{"d": moment}]}), formatted)
+        self.assertEqual(Ovotemplate("{|n {=d}}").render({"n": [1], "d": moment}), formatted)
+        self.assertEqual(Ovotemplate("{#l {=v}{/s [{=d}]}}").render(
+            {"l": [{"v": "a", "d": moment}, {"v": "b", "d": moment}]}), "a[%s]b" % formatted)
+        # Through a setter, and nested two deep.
+        self.assertEqual(Ovotemplate("{:x {=d}}{=x}").render({"d": moment}), formatted)
+        self.assertEqual(Ovotemplate("{?c {#l {=d}}}").render({"c": 1, "l": [{"d": moment}]}), formatted)
+        # A date without a time is not a datetime and is left alone; so is a string.
+        self.assertEqual(Ovotemplate("{=d}").render({"d": "2026-01-02"}), "2026-01-02")
+
+    def test_verbose(self):
+        """verbose=True must not crash. Its print statements are the least exercised
+        code in the module, and one of them used to blow up on a ranged repetition
+        whose bound was 'x', because it formatted None with %d."""
+        import contextlib
+
+        global verbose
+        previous = verbose
+        try:
+            verbose = True
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                # Compiled while verbose, so Rep.__init__ talks too.
+                tem = Ovotemplate("{:x 1}{=x}{?c J}{!c N}{#l {=v}{/s ,}}"
+                                  "{#l:0:1 {=v}}{#l:x:1 {=v}}{#l:-1:x {=v}}{|l een}{+l meer}")
+                result = tem.render({"c": True, "l": [{"v": "a"}, {"v": "b"}]})
+            # {:x 1} sets, {=x} -> 1, {?c J} -> J, {!c N} -> nothing, the plain
+            # repetition -> a,b, then the three ranges -> a, a, b, and finally
+            # {|l} stays quiet on a list of two while {+l} speaks up.
+            self.assertEqual(result, "1Ja,baabmeer")
+            self.assertIn("Compile phase", captured.getvalue())
+            self.assertIn("Render phase", captured.getvalue())
+        finally:
+            verbose = previous
+
+    def test_pprint(self):
+        """pprint() shows the compiled tree, positions and all."""
+        import contextlib
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            Ovotemplate("a{=b}", "t.tpl").pprint()
+        shown = captured.getvalue()
+        self.assertIn("Lit @ t.tpl, line 1, column 1", shown)
+        self.assertIn("Sub b @ t.tpl, line 1, column 2", shown)
+
+    def test_no_template(self):
+        """Rendering without ever supplying a template is an error, not an empty page."""
+        self.assertRaises(Exception, Ovotemplate().render, {})
+        # An empty template string, however, is a perfectly good empty template.
+        self.assertEqual(Ovotemplate("").render({}), "")
+
+    def test_missing_attribute_on_object(self):
+        """An object that has neither the key nor the attribute is simply undefined,
+        rather than letting the AttributeError escape."""
+        import collections
+        Entry = collections.namedtuple("Entry", ["name"])
+
+        self.assertEqual(Ovotemplate("[{=nope}]").render(Entry("Mary")), "[]")
+        self.assertEqual(Ovotemplate("[{#nope {=x}}]").render(Entry("Mary")), "[]")
+        self.assertEqual(Ovotemplate("{?nope J}{!nope N}").render(Entry("Mary")), "N")
+        global strictvars
+        previous = strictvars
+        try:
+            strictvars = True
+            self.assertIn("unknown variable", html.unescape(Ovotemplate("{=nope}").render(Entry("Mary"))))
+        finally:
+            strictvars = previous
+
     def test_envflag(self):
         """Boolean settings can be taken from the environment, so a deployment can
         enable strict variables without a code change."""
