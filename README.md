@@ -345,3 +345,7 @@ af en is daarmee ongeveer 10% trager.
 Dat is geen reden om de een of de ander te kiezen. Kies Ovotemplate als je één
 bestand wilt dat je helemaal kunt lezen; kies Jinja2 als je filters, overerving,
 macro's en een ecosysteem wilt.
+
+## Licentie
+
+MIT — zie [LICENSE](LICENSE).
