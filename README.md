@@ -306,6 +306,42 @@ import ovotemplate
 ovotemplate.strictvars = settings.DEBUG
 ```
 
+## Voordat je hem in productie zet
+
+Twee dingen die je zelf moet regelen. De rest staat goed by default.
+
+### 1. Zet `templateroot`
+
+Standaard staat hij op `None`, en dan openen `{$file}` en `{$verb}` elk pad dat
+uit de template rolt — ook een pad dat via `{=naam}` uit je context komt:
+
+```python
+ovotemplate.templateroot = "/srv/app/templates"   # of: OVOTEMPLATE_ROOT=...
+```
+
+Gebruik je `acquire()`, dan hoeft dit niet: die zet zijn eigen root voor de duur
+van de render. Zie [Includes opsluiten](#includes-opsluiten).
+
+### 2. Loop je templates na op escaping
+
+Escaping staat aan, en dat is de juiste stand — maar het betekent dat een
+template die bewust HTML door een variabele duwde nu entiteiten laat zien.
+Kom je die tegen, dan is dit de volgorde van voorkeur:
+
+```python
+{=!naam}                          # deze ene substitutie mag markup zijn
+render({"v": Raw(markup)})        # deze ene waarde, waar hij ook opduikt
+OVOTEMPLATE_AUTOESCAPE=0          # noodrem: alles weer ongeëscaped
+```
+
+Die laatste is bedoeld om een uitrol te kunnen terugdraaien zonder code te
+wijzigen, niet als eindstand. En let op de vier plekken waar escaping je
+sowieso niet redt: [Wat escaping niet doet](#wat-escaping-niet-doet).
+
+Overweeg daarnaast `strictvars` aan te zetten in development
+(`OVOTEMPLATE_STRICT=1`), zodat een typefout in een variabelenaam zichtbaar
+wordt in plaats van een leeg gat op te leveren.
+
 ## Installeren
 
 ```
